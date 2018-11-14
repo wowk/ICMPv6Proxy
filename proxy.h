@@ -1,22 +1,13 @@
 #ifndef ICMP6_PROXY_H__
 #define ICMP6_PROXY_H__
 
+#include "fdb.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <netinet/ether.h>
 
-
-struct port_t;
-
-struct fdb_entry_t {
-    struct ether_addr mac;
-    struct in6_addr addr;
-    struct port_t* port;
-};
-
-struct fdb_t {};
 
 struct port_t {
     int rawsock;
