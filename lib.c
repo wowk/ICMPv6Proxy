@@ -17,7 +17,43 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/ioctl.h>
+#include <sys/timerfd.h>
+#include <sys/time.h>
 
+
+int parse_args(int argc, char **argv, struct proxy_args_t *args)
+{
+    memset(args, 0, sizeof(*args));
+
+    int op;
+    while( -1 != (op = getopt(argc, argv, "l:w:rdDt:")) ){
+        switch (op) {
+        case 'l':
+            strcpy(args->lan_ifname,optarg);
+            break;
+        case 'w':
+            strcpy(args->wan_ifname,optarg);
+            break;
+        case 't':
+            args->ra_interval = atoi(optarg);
+            break;
+        case 'r':
+            args->ra_proxy = true;
+            break;
+        case 'd':
+            args->dad_proxy = true;
+            break;
+        case 'D':
+            args->debug = true;
+            break;
+        case '?':
+            error(1, EINVAL, "%s is not a valid option", argv[optind]);
+            return -1;
+        default:
+            break;
+        }
+    }
+}
 
 int join_multicast(struct port_t* port, const char* mc_group)
 {
@@ -49,6 +85,30 @@ int leave_multicast(struct port_t* port, const char* mc_group)
     return 0;
 }
 
+int create_timer(struct port_t* port, unsigned interval)
+{
+    port->timerfd = timerfd_create(CLOCK_BOOTTIME, TFD_CLOEXEC|TFD_NONBLOCK);
+    if( port->timerfd < 0 ){
+        error(0, errno, "failed create timer for %s", port->ifname);
+        return -errno;
+    }
+
+    struct itimerspec its = {
+        .it_interval.tv_sec = interval,
+        .it_interval.tv_nsec = 0,
+        .it_value.tv_sec = interval,
+        .it_value.tv_nsec = 0,
+    };
+
+    if( 0 > timerfd_settime(port->timerfd, TFD_TIMER_ABSTIME, &its, NULL) ){
+        close(port->timerfd);
+        error(0, errno, "failed to set timer for %s", port->ifname);
+        return -errno;
+    }
+
+    return 0;
+}
+
 int create_icmpv6_sock(struct port_t* port)
 {
     port->rawsock = socket(PF_INET6, SOCK_RAW, IPPROTO_ICMPV6);
@@ -66,6 +126,13 @@ int create_icmpv6_sock(struct port_t* port)
     int pktinfo_on = 1;
     if( 0 > setsockopt(port->rawsock, SOL_IPV6, IPV6_RECVPKTINFO, &pktinfo_on, sizeof(pktinfo_on)) ){
         error(0, errno, "failed to set RECVPKTINFO flag");
+        close(port->rawsock);
+        return -errno;
+    }
+
+    int loop_on = 0;
+    if( 0 > setsockopt(port->rawsock, SOL_IPV6,  IPV6_MULTICAST_LOOP, &loop_on, sizeof(loop_on))){
+        error(0, errno, "failed to disable multicast loop");
         close(port->rawsock);
         return -errno;
     }

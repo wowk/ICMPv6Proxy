@@ -3,6 +3,8 @@
 
 #include "proxy.h"
 
+extern int create_timer(struct port_t* port, unsigned interval);
+extern int parse_args(int argc, char** argv, struct proxy_args_t* args);
 extern int join_multicast(struct port_t* port, const char* mc_group);
 extern int leave_multicast(struct port_t* port, const char* mc_group);
 extern int create_icmpv6_sock(struct port_t* port);
