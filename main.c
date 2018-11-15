@@ -21,6 +21,7 @@
 
 static void cleanup_icmp6proxy(struct icmp6_proxy_t* proxy);
 
+
 int main(int argc, char** argv)
 {
     struct icmp6_proxy_t* icmp6proxy;
@@ -105,7 +106,7 @@ int main(int argc, char** argv)
         }
 
         if( FD_ISSET(icmp6proxy->lan.rawsock, &rfdset) ){
-            retlen = recv_icmpv6_pkt(&icmp6proxy->lan, pktbuf, sizeof(pktbuf), &from, &to);
+            retlen = recv_pkt(&icmp6proxy->lan, pktbuf, sizeof(pktbuf), &from, &to);
             if( 0 > retlen ){
                 error(0, errno, "failed to read icmp6 packet from lan");
                 break;
@@ -114,7 +115,7 @@ int main(int argc, char** argv)
         }
 
         if( FD_ISSET(icmp6proxy->wan.rawsock, &rfdset) ){
-            retlen = recv_icmpv6_pkt(&icmp6proxy->wan, pktbuf, sizeof(pktbuf), &from, &to);
+            retlen = recv_pkt(&icmp6proxy->wan, pktbuf, sizeof(pktbuf), &from, &to);
             if( 0 > retlen ){
                 error(0, errno, "failed to read icmp6 packet from wan");
                 break;
@@ -124,42 +125,15 @@ int main(int argc, char** argv)
 
         if( FD_ISSET(icmp6proxy->lan.timerfd, &rfdset) ){
             uint64_t expirations;
+            struct in6_addr to;
+            inet_pton(PF_INET6, "ff02::1", &to);
             read(icmp6proxy->lan.timerfd, &expirations, sizeof(expirations));
             if( !icmp6proxy->got_same_prefix_at_both_side ){
                 struct prefix_info_t* pi;
                 TAILQ_FOREACH(pi, &icmp6proxy->lan.prefix_list, entry){
-                    struct nd_router_advert hdr;
-                    /*
-#define nd_ra_type               nd_ra_hdr.icmp6_type
-#define nd_ra_code               nd_ra_hdr.icmp6_code
-#define nd_ra_cksum              nd_ra_hdr.icmp6_cksum
-#define nd_ra_curhoplimit        nd_ra_hdr.icmp6_data8[0]
-#define nd_ra_flags_reserved     nd_ra_hdr.icmp6_data8[1]
-#define ND_RA_FLAG_MANAGED       0x80
-#define ND_RA_FLAG_OTHER         0x40
-#define ND_RA_FLAG_HOME_AGENT    0x20
-#define nd_ra_router_lifetime    nd_ra_hdr.icmp6_data16[1]
-*/
-                    hdr.nd_ra_type  = ND_ROUTER_ADVERT;
-                    hdr.nd_ra_code  = 0;
-                    hdr.nd_ra_cksum = 0;
-                    hdr.nd_ra_curhoplimit = 64;
-                    hdr.nd_ra_flags_reserved = ND_RA_FLAG_MANAGED;
-                    hdr.nd_ra_flags_reserved |= ND_RA_FLAG_OTHER;
-                    hdr.nd_ra_router_lifetime = 1800;
-                    hdr.nd_ra_reachable = 0;
-                    hdr.nd_ra_retransmit = 0;
-
-                    struct nd_opt_mtu mtu;
-                    mtu.nd_opt_mtu_mtu = 1500;
-                    mtu.nd_opt_mtu_type = ND_OPT_MTU;
-                    mtu.nd_opt_mtu_len = sizeof(mtu);
-                    mtu.nd_opt_mtu_reserved = 0;
-
-
-                    struct nd_opt_prefix_info pihdr;
-
-
+                    if( 0 > send_ra(&icmp6proxy->lan, pi, &to) ){
+                        error(0, errno, "failed to send RA packet to LAN side");
+                    }
                 }
             }
         }

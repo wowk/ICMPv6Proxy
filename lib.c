@@ -1,9 +1,10 @@
 #define _GNU_SOURCE
 
 #include "lib.h"
-#include <a.out.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdarg.h>
 #include <getopt.h>
 #include <error.h>
 #include <errno.h>
@@ -152,7 +153,28 @@ int create_icmpv6_sock(struct port_t* port)
     return 0;
 }
 
-ssize_t recv_icmpv6_pkt(
+int gethwaddr(struct port_t* port)
+{
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    memcpy(ifr.ifr_name, port->ifname, sizeof(port->ifname));
+
+    int fd = socket(AF_INET6, SOCK_DGRAM, 0);
+    if( fd < 0 ){
+        error(0, errno, "failed to get %s's hwaddr", port->ifname);
+    }else if( ioctl(fd, SIOCGIFHWADDR, &ifr) < 0 ){
+        error(0, errno, "failed to get %s's hwaddr", port->ifname);
+        close(fd);
+        return -1;
+    }
+    close(fd);
+
+    memcpy(&port->mac, ifr.ifr_hwaddr.sa_data, sizeof(port->mac));
+
+    return 0;
+}
+
+ssize_t recv_pkt(
         struct port_t* port,
         void* buf, size_t len,
         struct in6_addr* from,
@@ -188,26 +210,29 @@ ssize_t recv_icmpv6_pkt(
     return ret;
 }
 
-ssize_t send_icmpv6_pkt(
-        struct port_t* port,
-        void* buf, size_t len,
-        struct in6_addr* to)
+ssize_t send_pkt(struct port_t* port, struct in6_addr* to, size_t iovec_count, ...)
 {
     ssize_t ret;
     uint8_t cbuf[sizeof(struct in6_pktinfo) + sizeof(struct cmsghdr)];
     struct msghdr msghdr;
-    struct iovec iovec;
     struct sockaddr_in6 si6;
+    struct iovec iovec[iovec_count];
+    va_list val;
+
+    va_start(val, iovec_count);
+    for( size_t i = 0 ; i < iovec_count ; i ++ ){
+        iovec[i].iov_base   = va_arg(val, void*);
+        iovec[i].iov_len    = va_arg(val, size_t);
+    }
+    va_end(val);
 
     memset(&si6, 0, sizeof(si6));
     si6.sin6_family = PF_INET6;
     memcpy(&si6.sin6_addr, to, sizeof(si6.sin6_addr));
 
     memset(&cbuf, 0, sizeof(cbuf));
-    iovec.iov_base          = buf;
-    iovec.iov_len           = len;
-    msghdr.msg_iovlen       = 1;
-    msghdr.msg_iov          = &iovec;
+    msghdr.msg_iov          = iovec;
+    msghdr.msg_iovlen       = iovec_count;
     msghdr.msg_control      = NULL;
     msghdr.msg_controllen   = 0;
     msghdr.msg_flags        = 0;
@@ -221,23 +246,3 @@ ssize_t send_icmpv6_pkt(
     return ret;
 }
 
-int gethwaddr(struct port_t* port)
-{
-    struct ifreq ifr;
-    memset(&ifr, 0, sizeof(ifr));
-    memcpy(ifr.ifr_name, port->ifname, sizeof(port->ifname));
-
-    int fd = socket(AF_INET6, SOCK_DGRAM, 0);
-    if( fd < 0 ){
-        error(0, errno, "failed to get %s's hwaddr", port->ifname);
-    }else if( ioctl(fd, SIOCGIFHWADDR, &ifr) < 0 ){
-        error(0, errno, "failed to get %s's hwaddr", port->ifname);
-        close(fd);
-        return -1;
-    }
-    close(fd);
-
-    memcpy(&port->mac, ifr.ifr_hwaddr.sa_data, sizeof(port->mac));
-
-    return 0;
-}

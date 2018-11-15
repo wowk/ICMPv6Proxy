@@ -3,6 +3,7 @@
 #include "fdb.h"
 #include "proxy.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <error.h>
 #include <errno.h>   
 #include <netinet/in.h>
@@ -169,13 +170,55 @@ static struct nd_opt_hdr* find_nd_option(struct icmp6_hdr* hdr, size_t len, uint
     return opthdr;
 }
 
+int send_ra(struct port_t* port, struct prefix_info_t* pi, struct in6_addr* addr)
+{
+    int ret;
+    struct nd_router_advert hdr;
+
+    hdr.nd_ra_type  = ND_ROUTER_ADVERT;
+    hdr.nd_ra_code  = 0;
+    hdr.nd_ra_cksum = 0;
+    hdr.nd_ra_curhoplimit = 64;
+    hdr.nd_ra_flags_reserved = ND_RA_FLAG_MANAGED;
+    hdr.nd_ra_flags_reserved |= ND_RA_FLAG_OTHER;
+    hdr.nd_ra_router_lifetime = 1800;
+    hdr.nd_ra_reachable = 0;
+    hdr.nd_ra_retransmit = 0;
+
+    struct nd_opt_mtu mtu;
+    mtu.nd_opt_mtu_mtu = 1500;
+    mtu.nd_opt_mtu_type = ND_OPT_MTU;
+    mtu.nd_opt_mtu_len = sizeof(mtu);
+    mtu.nd_opt_mtu_reserved = 0;
+
+    struct nd_opt_source_link_addr {
+        uint8_t type;
+        uint8_t len;
+        struct ether_addr mac;
+    } __attribute__((packed)) opt_linkaddr;
+
+    opt_linkaddr.type = ND_OPT_SOURCE_LINKADDR;
+    opt_linkaddr.len  = sizeof(struct nd_opt_source_link_addr);
+    memcpy(&opt_linkaddr.mac, &port->mac, sizeof(port->mac));
+
+    ret = send_pkt(port, addr, 4, &hdr, sizeof(hdr), &mtu, sizeof(mtu),
+                    &opt_linkaddr, sizeof(opt_linkaddr), &pi->info, sizeof(pi->info));
+
+    return ret;
+}
+
+
 int handle_wan_side(struct icmp6_proxy_t* proxy, struct icmp6_hdr* hdr, size_t len, 
                             struct in6_addr* from, struct in6_addr* to)
 {
     dump_icmp_pkt(&proxy->wan, hdr, from, to);
 
     /* proxy RA packet from wan side */
-    if( hdr->icmp6_type == ND_ROUTER_ADVERT && proxy->ra_proxy && !proxy->got_same_prefix_at_both_side){
+    if( hdr->icmp6_type == ND_ROUTER_ADVERT ){
+        if( !proxy->ra_proxy ){
+            return 0;
+        }
+
         struct nd_opt_hdr* opthdr;
         struct nd_opt_prefix_info* pref;
 
@@ -191,7 +234,7 @@ int handle_wan_side(struct icmp6_proxy_t* proxy, struct icmp6_hdr* hdr, size_t l
         update_prefix_info(&proxy->wan);
 
         /* add new incoming prefix*/
-        add_prefix_info(&proxy->wan.prefix_list, pref);
+        add_prefix_info(&proxy->wan, pref);
 
         /* forward it to LAN side */
         opthdr = find_nd_option(hdr, len, ND_OPT_SOURCE_LINKADDR);
@@ -202,7 +245,7 @@ int handle_wan_side(struct icmp6_proxy_t* proxy, struct icmp6_hdr* hdr, size_t l
         void* linkaddr_pos = (void*)(opthdr) + opthdr->nd_opt_len;
         memcpy(linkaddr_pos, &proxy->lan.mac, sizeof(proxy->lan.mac));
 
-        send_icmpv6_pkt(&proxy->lan, hdr, len, to);
+        send_pkt(&proxy->lan, to, 1, hdr, len);
 
         return 0;
     }
@@ -242,16 +285,25 @@ int handle_lan_side(struct icmp6_proxy_t* proxy, struct icmp6_hdr* hdr, size_t l
         update_prefix_info(&proxy->wan);
 
         /* add new incoming prefix*/
-        add_prefix_info(&proxy->lan.prefix_list, pref);
-//        if( TAILQ_EMPTY(&proxy->wan) ){
-//            return 0;
-//        }
-//        if( find_prefix_info(&proxy->wan, lan_pref) ){
-//            proxy->got_same_prefix_at_both_side = true;
-//            clear_prefix_info(&proxy->lan);
-//            clear_prefix_info(&proxy->wan);
-//            return 0;
-//        }
+        add_prefix_info(&proxy->lan, pref);
+
+        if( find_prefix_info(&proxy->wan, pref) ){
+            proxy->got_same_prefix_at_both_side = true;
+            return 0;
+        }
+
+        return 0;
+    }
+
+    if( hdr->icmp6_type == ND_ROUTER_SOLICIT ){
+        if( !proxy->ra_proxy || proxy->got_same_prefix_at_both_side ){
+            return 0;
+        }
+
+        struct prefix_info_t* pi;
+        TAILQ_FOREACH(pi, &proxy->wan.prefix_list, entry){
+            send_ra(&proxy->wan, pi, from);
+        }
 
         return 0;
     }
@@ -261,16 +313,15 @@ int handle_lan_side(struct icmp6_proxy_t* proxy, struct icmp6_hdr* hdr, size_t l
         struct in6_addr* target_v6addr = (struct in6_addr*)(ns + 1);
 
         if( IN6_IS_ADDR_UNSPECIFIED(from) && IN6_IS_ADDR_MULTICAST(to) ){
-            //this is a DAD NS packet
+            add_fdb_entry(proxy->fdb, &proxy->lan, target_v6addr, linkaddr);
         }
 
         struct nd_opt_hdr* opthdr = (struct nd_opt_hdr*)(target_v6addr + 1);
         if( opthdr->nd_opt_type != ND_OPT_SOURCE_LINKADDR ){
             return 0;
         }
-
         struct ether_addr* linkaddr = (struct ether_addr*)(opthdr + 1);
-        //add_fdb_entry(proxy->fdb, &proxy->lan, target_v6addr, linkaddr);
+        //
 
         return 0;
     }
