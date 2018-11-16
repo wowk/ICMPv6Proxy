@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 
 #include "lib.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -20,6 +21,9 @@
 #include <sys/ioctl.h>
 #include <sys/timerfd.h>
 #include <sys/time.h>
+#include <net/if_packet.h>
+#include <netpacket/packet.h>
+#include <linux/filter.h>
 
 
 int parse_args(int argc, char **argv, struct proxy_args_t *args)
@@ -56,36 +60,6 @@ int parse_args(int argc, char **argv, struct proxy_args_t *args)
     }
 }
 
-int join_multicast(struct port_t* port, const char* mc_group)
-{
-    struct ipv6_mreq mreq;
-
-    mreq.ipv6mr_interface   = port->ifindex;
-    inet_pton(AF_INET6, mc_group, &mreq.ipv6mr_multiaddr);
-
-    if( 0 > setsockopt(port->rawsock, SOL_IPV6, IPV6_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) ){
-        error(0, errno, "failed to join multicast group %s", mc_group);
-        return -errno;
-    }
-
-    return 0;
-}
-
-int leave_multicast(struct port_t* port, const char* mc_group)
-{
-    struct ipv6_mreq mreq;
-
-    mreq.ipv6mr_interface   = port->ifindex;
-    inet_pton(AF_INET6, mc_group, &mreq.ipv6mr_multiaddr);
-
-    if( 0 > setsockopt(port->rawsock, SOL_IPV6, IPV6_DROP_MEMBERSHIP, &mreq, sizeof(mreq)) ){
-        error(0, errno, "failed to leave multicast group %s", mc_group);
-        return -errno;
-    }
-
-    return 0;
-}
-
 int create_timer(struct port_t* port, unsigned interval)
 {
     port->timerfd = timerfd_create(CLOCK_BOOTTIME, TFD_CLOEXEC|TFD_NONBLOCK);
@@ -110,44 +84,41 @@ int create_timer(struct port_t* port, unsigned interval)
     return 0;
 }
 
-int create_icmpv6_sock(struct port_t* port)
+int create_raw_sock(struct port_t* port)
 {
-    port->rawsock = socket(PF_INET6, SOCK_RAW, IPPROTO_ICMPV6);
+    /* bpf filter to capture all icmpv6 packets */
+    struct sock_filter filter[] = {
+        { 0x28, 0, 0, 0x0000000c },
+        { 0x15, 0, 6, 0x000086dd },
+        { 0x30, 0, 0, 0x00000014 },
+        { 0x15, 3, 0, 0x0000003a },
+        { 0x15, 0, 3, 0x0000002c },
+        { 0x30, 0, 0, 0x00000036 },
+        { 0x15, 0, 1, 0x0000003a },
+        { 0x6, 0, 0, 0x00000640 },
+        { 0x6, 0, 0, 0x00000000 },
+    };
+
+    struct sock_fprog sprog = {
+        .len    = sizeof(filter)/sizeof(struct sock_filter),
+        .filter = filter,
+    };
+
+    port->rawsock = socket(PF_PACKET, SOCK_RAW, htons(ETH_P_IPV6));
     if( port->rawsock < 0 ){
         error(0, errno, "failed to create ICMPV6 socket");
         return -errno;
+    }
+
+    if( 0 > setsockopt(port->rawsock, SOL_SOCKET, SO_ATTACH_FILTER, &sprog, sizeof(sprog)) ){
+        error(0, errno, "failed to attach filter for icmpv6");
+        return -1;
     }
 
     if( 0 > setsockopt(port->rawsock, SOL_SOCKET, SO_BINDTODEVICE, port->ifname, sizeof(port->ifname)) ){
         error(0, errno, "failed to bind socket to device %s", port->ifname);
         close(port->rawsock);
         return -errno;
-    }
-
-    int pktinfo_on = 1;
-    if( 0 > setsockopt(port->rawsock, SOL_IPV6, IPV6_RECVPKTINFO, &pktinfo_on, sizeof(pktinfo_on)) ){
-        error(0, errno, "failed to set RECVPKTINFO flag");
-        close(port->rawsock);
-        return -errno;
-    }
-
-    int loop_on = 0;
-    if( 0 > setsockopt(port->rawsock, SOL_IPV6,  IPV6_MULTICAST_LOOP, &loop_on, sizeof(loop_on))){
-        error(0, errno, "failed to disable multicast loop");
-        close(port->rawsock);
-        return -errno;
-    }
-
-    if( !port->join_node_router_group && 0 == join_multicast(port, "ff01::2") ){
-        port->join_node_router_group = true;
-    }
-
-    if( !port->join_link_router_group && 0 == join_multicast(port, "ff02::1") ){
-        port->join_link_router_group = true;
-    }
-
-    if( !port->join_site_router_group && 0 == join_multicast(port, "ff02::1:ff00:0/104") ){
-        port->join_site_router_group = true;
     }
 
     return 0;
@@ -174,38 +145,38 @@ int gethwaddr(struct port_t* port)
     return 0;
 }
 
-ssize_t recv_pkt(
-        struct port_t* port,
-        void* buf, size_t len,
-        struct in6_addr* from,
-        struct in6_addr* to)
+struct ip6_hdr* ipv6_header(void* buffer, size_t* offset)
+{
+    *offset += sizeof(struct ether_header);
+    return (struct ip6_hdr*)(buffer + sizeof(struct ether_header));
+}
+
+struct icmp6_hdr* icmp6_header(void* buffer, size_t* offset)
+{
+    *offset = sizeof(struct ip6_hdr);
+    struct ip6_hdr* hdr = (struct ip6_hdr*)buffer;
+
+    if( hdr->ip6_nxt == IPPROTO_ICMPV6 ){
+        return (struct hdr*)(hdr + 1);
+    }
+
+    struct ip6_ext* ehdr = (struct ip6_hdr*)(hdr + 1);
+    *offset += (ehdr->ip6e_len + sizeof(struct ip6_ext));
+    while( ehdr->ip6e_nxt != 58 ){
+        ehdr = (struct ip6_ext*)((void*)ehdr + ehdr->ip6e_len + sizeof(struct ip6_ext));
+        *offset += (ehdr->ip6e_len + sizeof(struct ip6_ext));
+    }
+
+    return (struct icmp6_hdr*)((void*)ehdr + ehdr->ip6e_len + sizeof(struct ip6_ext));
+}
+
+ssize_t recv_pkt(struct port_t* port, void* buf, size_t len)
 {
     ssize_t ret;
-    uint8_t cbuf[sizeof(struct in6_pktinfo) + sizeof(struct cmsghdr)];
-    struct msghdr msghdr;
-    struct iovec iovec;
-    struct sockaddr_in6 si6;
-
-    memset(&cbuf, 0, sizeof(cbuf));
-    iovec.iov_base          = buf;
-    iovec.iov_len           = len;
-    msghdr.msg_iovlen       = 1;
-    msghdr.msg_iov          = &iovec;
-    msghdr.msg_control      = cbuf;
-    msghdr.msg_controllen   = sizeof(cbuf);
-    msghdr.msg_flags        = 0;
-    msghdr.msg_name         = &si6;
-    msghdr.msg_namelen      = sizeof(si6);
 
     do{
-        ret = recvmsg(port->rawsock, &msghdr, 0);
-    }while( ret > 0 && errno == EINTR);
-
-    if( ret > 0 ){
-        struct in6_pktinfo* pktinfo = (struct in6_pktinfo*)CMSG_DATA((struct cmsghdr*)cbuf);
-        memcpy(to, &pktinfo->ipi6_addr, sizeof(pktinfo->ipi6_addr));
-        memcpy(from, &si6.sin6_addr, sizeof(si6.sin6_addr));
-    }
+        ret = recvfrom(port->rawsock, buf, len, 0, NULL, NULL);
+    }while( ret < 0 && errno == EINTR);
 
     return ret;
 }
@@ -241,7 +212,7 @@ ssize_t send_pkt(struct port_t* port, struct in6_addr* to, size_t iovec_count, .
 
     do{
         ret = sendmsg(port->rawsock, &msghdr, 0);
-    }while( ret > 0 && errno == EINTR);
+    }while( ret < 0 && errno == EINTR);
 
     return ret;
 }

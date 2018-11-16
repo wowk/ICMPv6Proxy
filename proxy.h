@@ -2,6 +2,7 @@
 #define ICMP6_PROXY_H__
 
 #include "fdb.h"
+#include "proxy.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <net/if.h>
@@ -20,12 +21,13 @@ struct proxy_args_t {
     uint32_t ra_interval;
 };
 
-struct prefix_info_t {
-    TAILQ_ENTRY(prefix_info_t) entry;
-    struct nd_opt_prefix_info info;
+struct ra_info_t {
+    TAILQ_ENTRY(ra_info_t) entry;
     time_t expired_time;
+    size_t pref_hdr_offset;
+    struct icmp6 info[0];
 };
-TAILQ_HEAD(prefix_info_list_t, prefix_info_t);
+TAILQ_HEAD(ra_info_list_t, ra_info_t);
 
 struct port_t {
     int timerfd;
@@ -34,16 +36,13 @@ struct port_t {
     char ifname[IF_NAMESIZE];
     struct ether_addr mac;
     struct sockaddr_in6 addr;
-    struct prefix_info_list_t prefix_list;
-    bool join_node_router_group;
-    bool join_link_router_group;
-    bool join_site_router_group;
+    struct ra_info_list_t ra_list;
 };
 
 struct icmp6_proxy_t {
     struct port_t wan;
     struct port_t lan;
-    struct fdb_t*  fdb;
+    struct fdb_t  fdb;
     uint32_t max_entrys;
     uint32_t aging_time;
     uint32_t timeout;

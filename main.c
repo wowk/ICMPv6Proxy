@@ -34,6 +34,7 @@ int main(int argc, char** argv)
         error(1, errno, "failed to create icmp6proxy object");
     }
 
+    icmp6proxy->timeout     = 1;
     icmp6proxy->ra_proxy    = args.ra_proxy;
     icmp6proxy->dad_proxy   = args.dad_proxy;
     icmp6proxy->debug       = args.debug;
@@ -41,8 +42,15 @@ int main(int argc, char** argv)
     icmp6proxy->wan.ifindex = if_nametoindex(args.wan_ifname);
     strcpy(icmp6proxy->lan.ifname, args.lan_ifname);
     strcpy(icmp6proxy->wan.ifname, args.wan_ifname);
+    TAILQ_INIT(&icmp6proxy->lan.ra_list);
+    TAILQ_INIT(&icmp6proxy->wan.ra_list);
 
-    if( create_icmpv6_sock(&icmp6proxy->lan) < 0 ){
+    if( create_raw_sock(&icmp6proxy->lan) < 0 ){
+        cleanup_icmp6proxy(icmp6proxy);
+        return -errno;
+    }
+
+    if( create_raw_sock(&icmp6proxy->wan) < 0 ){
         cleanup_icmp6proxy(icmp6proxy);
         return -errno;
     }
@@ -57,17 +65,12 @@ int main(int argc, char** argv)
         return -errno;
     }
 
-    if( create_icmpv6_sock(&icmp6proxy->wan) < 0 ){
+    if( create_timer(&icmp6proxy->lan, args.ra_interval) < 0 ){
         cleanup_icmp6proxy(icmp6proxy);
         return -errno;
     }
 
     if( create_timer(&icmp6proxy->wan, args.ra_interval) < 0 ){
-        cleanup_icmp6proxy(icmp6proxy);
-        return -errno;
-    }
-
-    if( create_timer(&icmp6proxy->lan, args.ra_interval) < 0 ){
         cleanup_icmp6proxy(icmp6proxy);
         return -errno;
     }
@@ -106,21 +109,31 @@ int main(int argc, char** argv)
         }
 
         if( FD_ISSET(icmp6proxy->lan.rawsock, &rfdset) ){
-            retlen = recv_pkt(&icmp6proxy->lan, pktbuf, sizeof(pktbuf), &from, &to);
+            retlen = recv_pkt(&icmp6proxy->lan, pktbuf, sizeof(pktbuf));
             if( 0 > retlen ){
                 error(0, errno, "failed to read icmp6 packet from lan");
                 break;
             }
-            handle_lan_side(icmp6proxy, (struct icmp6_hdr*)pktbuf, retlen, &from, &to);
+            size_t offset = 0;
+            struct ip6_hdr* ip6hdr = ipv6_header(pktbuf, &offset);
+            memcpy(&from, &ip6hdr->ip6_src, sizeof(from));
+            memcpy(&to, &ip6hdr->ip6_dst, sizeof(from));
+            struct icmp6_hdr* icmp6hdr = icmp6_header(ip6hdr, &offset);
+            handle_lan_side(icmp6proxy, icmp6hdr, retlen - offset, &from, &to);
         }
 
         if( FD_ISSET(icmp6proxy->wan.rawsock, &rfdset) ){
-            retlen = recv_pkt(&icmp6proxy->wan, pktbuf, sizeof(pktbuf), &from, &to);
+            retlen = recv_pkt(&icmp6proxy->wan, pktbuf, sizeof(pktbuf));
             if( 0 > retlen ){
                 error(0, errno, "failed to read icmp6 packet from wan");
                 break;
             }
-            handle_wan_side(icmp6proxy, (struct icmp6_hdr*)pktbuf, retlen, &from, &to);
+            size_t offset = 0;
+            struct ip6_hdr* ip6hdr = ipv6_header(pktbuf, &offset);
+            memcpy(&from, &ip6hdr->ip6_src, sizeof(from));
+            memcpy(&to, &ip6hdr->ip6_dst, sizeof(from));
+            struct icmp6* icmp6hdr = icmp6_header(ip6hdr, &offset);
+            handle_wan_side(icmp6proxy, icmp6hdr, retlen - offset, &from, &to);
         }
 
         if( FD_ISSET(icmp6proxy->lan.timerfd, &rfdset) ){
@@ -129,9 +142,9 @@ int main(int argc, char** argv)
             inet_pton(PF_INET6, "ff02::1", &to);
             read(icmp6proxy->lan.timerfd, &expirations, sizeof(expirations));
             if( !icmp6proxy->got_same_prefix_at_both_side ){
-                struct prefix_info_t* pi;
-                TAILQ_FOREACH(pi, &icmp6proxy->lan.prefix_list, entry){
-                    if( 0 > send_ra(&icmp6proxy->lan, pi, &to) ){
+                struct ra_info_t* ri;
+                TAILQ_FOREACH(ri, &icmp6proxy->lan.ra_list, entry){
+                    if( 0 > send_ra(&icmp6proxy->lan, ri, &to) ){
                         error(0, errno, "failed to send RA packet to LAN side");
                     }
                 }
@@ -141,7 +154,9 @@ int main(int argc, char** argv)
         if( FD_ISSET(icmp6proxy->wan.timerfd, &rfdset) ){
             uint64_t expirations;
             read(icmp6proxy->wan.timerfd, &expirations, sizeof(expirations));
-            printf("WAN timer triggerred\n");
+            /* remove timeout prefix item */
+            update_prefix_info(&icmp6proxy->lan);
+            update_prefix_info(&icmp6proxy->wan);
         }
     }
 
@@ -151,16 +166,7 @@ int main(int argc, char** argv)
 }
 
 void cleanup_icmp6proxy(struct icmp6_proxy_t* proxy) {
-    if( proxy->wan.join_link_router_group ){
-        leave_multicast(&proxy->wan, "ff02::2");
-    }
-
-    if( proxy->lan.join_link_router_group ){
-        leave_multicast(&proxy->wan, "ff02::2");
-    }
-
     close(proxy->wan.rawsock);
     close(proxy->lan.rawsock);
-
-    clear_fdb(proxy->fdb);
+    clear_fdb(&proxy->fdb);
 }

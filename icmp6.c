@@ -13,85 +13,96 @@
 #include <sys/sysinfo.h>
 
 
-static struct prefix_info_t* find_prefix_info(struct port_t* port, struct nd_opt_prefix_info* info)
+static struct ra_info_t* find_ra_info_by_prefix(struct port_t* port, struct icmp6_opt* info)
 {
-    struct prefix_info_t* pi;
+    struct ra_info_t* ri;
+    struct icmp6_opt* opt;
 
-    TAILQ_FOREACH(pi, &port->prefix_list, entry){
-        if( pi->info.nd_opt_pi_prefix_len != info->nd_opt_pi_prefix_len ){
+    TAILQ_FOREACH(ri, &port->ra_list, entry){
+        opt = (struct icmp6_opt*)((void*)ri + ri->pref_hdr_offset);
+        if( opt->prefix.nd_opt_pi_prefix_len != info->prefix.nd_opt_pi_prefix_len ){
             continue;
-        }
-        if( !IN6_ARE_ADDR_EQUAL(&pi->info.nd_opt_pi_prefix, &info->nd_opt_pi_prefix) ){
+        }else if( !IN6_ARE_ADDR_EQUAL(&opt->prefix.nd_opt_pi_prefix, &info->prefix.nd_opt_pi_prefix) ){
             continue;
         }
         break;
     }
 
-    return pi;
+    return ri;
 }
 
-static struct prefix_info_t* add_prefix_info(struct port_t* port, struct nd_opt_prefix_info* info)
+static struct ra_info_t* add_ra_info(struct port_t* port, struct icmp6* icmp6)
 {
-    size_t size;
-    struct prefix_info_t* pi;
+    struct ra_info_t* ri;
+    struct icmp6_opt* opt;
 
-    pi = find_prefix_info(port, info);
-    if( !pi ){
-        size = sizeof(struct prefix_info_t);
-        pi = (struct prefix_info_t*)malloc(size);
-        if( !pi ){
-            error(0, errno, "failed to create new prefix info node");
-            return NULL;
-        }
-        TAILQ_INSERT_HEAD(&port->prefix_list, pi, entry);
+    opt = find_nd_option(icmp6, len, ND_OPT_PREFIX_INFORMATION);
+    if( !opt ){
+        return NULL;
     }
 
+    /* find|create new RA node */
+    ri = find_ra_info_by_prefix(port, opt);
+    if( !ri ){
+        ri = (struct ra_info_t*)malloc(sizeof(struct ra_info_t) + icmp6->len);
+        if( !ri ){
+            error(0, errno, "failed to create new RA info node");
+            return NULL;
+        }
+    }
+    TAILQ_INSERT_HEAD(&port->ra_list, ri, entry);
+
+    /* update info */
     struct sysinfo si;
     sysinfo(&si);
-    memcpy(&pi->info, info, sizeof(pi->info));
-    pi->expired_time = si.uptime + info->nd_opt_pi_valid_time;
+    ri->expired_time = si.uptime + opt->prefix.nd_opt_pi_valid_time;
+    ri->pref_hdr_offset = (size_t)pi - (size_t)ra;
+    if( icmp6->len > ri->info->len ){
+        ri = (struct icmp6*)realloc(ri, icmp6->len);
+        memcpy(ri->info, icmp6, icmp6->len);
+    }
 
-    return pi;
+    return ri;
 }
 
-static void delete_prefix_info(struct port_t* port, struct prefix_info_t* info)
+static void delete_ra_info(struct port_t* port, struct ra_info_t* info)
 {
-    TAILQ_REMOVE(&port->prefix_list, info, entry);
+    TAILQ_REMOVE(&port->ra_list, info, entry);
     free(info);
 }
 
-static void update_prefix_info(struct port_t* port)
+static void update_ra_info(struct port_t* port)
 {
     struct sysinfo si;
-    struct prefix_info_t* pi;
-    struct prefix_info_t* deleted;
+    struct ra_info_t* ri;
+    struct ra_info_t* deleted;
 
     sysinfo(&si);
     deleted = NULL;
 
-    TAILQ_FOREACH(pi, &port->prefix_list, entry){
+    TAILQ_FOREACH(ri, &port->ra_list, entry){
         if( deleted ){
-            delete_prefix_info(port, deleted);
+            delete_ra_info(port, deleted);
             deleted = NULL;
         }
-        if( si.uptime > pi->expired_time){
-            deleted = pi;
+        if( si.uptime > ri->expired_time){
+            deleted = ri;
         }
     }
     if( deleted ){
-        delete_prefix_info(port, deleted);
+        delete_ra_info(port, deleted);
     }
 }
 
-static void clear_prefix_info(struct port_t* port)
+static void clear_ra_info(struct port_t* port)
 {
-    struct prefix_info_t* pi;
-    struct prefix_info_t* deleted;
+    struct ra_info_t* pi;
+    struct ra_info_t* deleted;
 
     deleted = NULL;
-    TAILQ_FOREACH(pi, &port->prefix_list, entry){
+    TAILQ_FOREACH(pi, &port->ra_list, entry){
         if( deleted ){
-            delete_prefix_info(port, deleted);
+            delete_ra_info(port, deleted);
             deleted = NULL;
         }
         pi = deleted;
@@ -135,7 +146,16 @@ static void dump_icmp_pkt(struct port_t* port, struct icmp6_hdr* hdr, struct in6
     printf("if: %s, from: %s, to: %s, type: %s\n", port->ifname, saddr, daddr, type);
 }
 
-static struct nd_opt_hdr* find_nd_option(struct icmp6_hdr* hdr, size_t len, uint32_t option)
+struct icmp6* find_icmp6(void* buffer, size_t len)
+{
+    size_t offset = 0;
+    struct ip6_hdr* ipv6hdr = ipv6_header(buffer, &offset);
+    struct icmp6* icmp6hdr = icmp6_header(ipv6hdr, &offset);
+    icmp6
+    return icmp6hdr;
+}
+
+struct nd_opt_hdr* find_nd_option(struct icmp6_hdr* hdr, size_t len, uint32_t option)
 {
     size_t offset;
 
@@ -170,7 +190,7 @@ static struct nd_opt_hdr* find_nd_option(struct icmp6_hdr* hdr, size_t len, uint
     return opthdr;
 }
 
-int send_ra(struct port_t* port, struct prefix_info_t* pi, struct in6_addr* addr)
+int send_ra(struct port_t* port, struct ra_info_t* pi, struct in6_addr* addr)
 {
     int ret;
     struct nd_router_advert hdr;
@@ -208,6 +228,7 @@ int send_ra(struct port_t* port, struct prefix_info_t* pi, struct in6_addr* addr
 }
 
 
+
 int handle_wan_side(struct icmp6_proxy_t* proxy, struct icmp6_hdr* hdr, size_t len, 
                             struct in6_addr* from, struct in6_addr* to)
 {
@@ -222,19 +243,8 @@ int handle_wan_side(struct icmp6_proxy_t* proxy, struct icmp6_hdr* hdr, size_t l
         struct nd_opt_hdr* opthdr;
         struct nd_opt_prefix_info* pref;
 
-        opthdr = find_nd_option(hdr, len, ND_OPT_PREFIX_INFORMATION);
-        /* dont interset in RA packet without prefix option */
-        if( !opthdr ){
-            return 0;
-        }
-        pref = (struct nd_opt_prefix_info*)opthdr;
-
-        /* remove timeout prefix item */
-        update_prefix_info(&proxy->lan);
-        update_prefix_info(&proxy->wan);
-
         /* add new incoming prefix*/
-        add_prefix_info(&proxy->wan, pref);
+        add_ra_info(&proxy->wan, hdr, len);
 
         /* forward it to LAN side */
         opthdr = find_nd_option(hdr, len, ND_OPT_SOURCE_LINKADDR);
@@ -256,8 +266,6 @@ int handle_wan_side(struct icmp6_proxy_t* proxy, struct icmp6_hdr* hdr, size_t l
 
     return 0;
 }
-
-
 
 int handle_lan_side(struct icmp6_proxy_t* proxy, struct icmp6_hdr* hdr, size_t len, 
                             struct in6_addr* from, struct in6_addr* to)
@@ -281,11 +289,11 @@ int handle_lan_side(struct icmp6_proxy_t* proxy, struct icmp6_hdr* hdr, size_t l
         pref = (struct nd_opt_prefix_info*)opthdr;
 
         /* remove timeout prefix item */
-        update_prefix_info(&proxy->lan);
-        update_prefix_info(&proxy->wan);
+        update_ra_info(&proxy->lan);
+        update_ra_info(&proxy->wan);
 
         /* add new incoming prefix*/
-        add_prefix_info(&proxy->lan, pref);
+        add_ra_info(&proxy->lan, pref);
 
         if( find_prefix_info(&proxy->wan, pref) ){
             proxy->got_same_prefix_at_both_side = true;
@@ -300,8 +308,8 @@ int handle_lan_side(struct icmp6_proxy_t* proxy, struct icmp6_hdr* hdr, size_t l
             return 0;
         }
 
-        struct prefix_info_t* pi;
-        TAILQ_FOREACH(pi, &proxy->wan.prefix_list, entry){
+        struct ra_info_t* pi;
+        TAILQ_FOREACH(pi, &proxy->wan.ra_list, entry){
             send_ra(&proxy->wan, pi, from);
         }
 
@@ -312,16 +320,15 @@ int handle_lan_side(struct icmp6_proxy_t* proxy, struct icmp6_hdr* hdr, size_t l
         struct nd_neighbor_solicit* ns = (struct nd_neighbor_solicit*)hdr;
         struct in6_addr* target_v6addr = (struct in6_addr*)(ns + 1);
 
-        if( IN6_IS_ADDR_UNSPECIFIED(from) && IN6_IS_ADDR_MULTICAST(to) ){
-            add_fdb_entry(proxy->fdb, &proxy->lan, target_v6addr, linkaddr);
-        }
-
-        struct nd_opt_hdr* opthdr = (struct nd_opt_hdr*)(target_v6addr + 1);
-        if( opthdr->nd_opt_type != ND_OPT_SOURCE_LINKADDR ){
+        struct nd_opt_hdr* opthdr = find_nd_option(hdr, len, ND_OPT_SOURCE_LINKADDR);
+        if( !opthdr ){
             return 0;
         }
         struct ether_addr* linkaddr = (struct ether_addr*)(opthdr + 1);
-        //
+        if( IN6_IS_ADDR_UNSPECIFIED(from) && IN6_IS_ADDR_MULTICAST(to) ){
+            add_fdb_entry(&proxy->fdb, &proxy->lan, target_v6addr, linkaddr);
+        }
+
 
         return 0;
     }
