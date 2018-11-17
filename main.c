@@ -146,6 +146,17 @@ int main(int argc, char** argv)
         if( FD_ISSET(icmp6proxy->timerfd, &rfdset) ){
             uint64_t expirations;
             read(icmp6proxy->timerfd, &expirations, sizeof(expirations));
+            if(!icmp6proxy->dad_proxy && !icmp6proxy->ra_proxy){
+                continue;
+            }
+            if(icmp6proxy->dad_proxy){
+                update_nd_table(&icmp6proxy->lan.nd_table);
+                update_nd_table(&icmp6proxy->wan.nd_table);
+            }
+            if(icmp6proxy->ra_proxy){
+                ;
+            }
+
         }
     }
 
