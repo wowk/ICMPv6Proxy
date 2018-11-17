@@ -6,11 +6,11 @@ CONFIG -= qt
 SOURCES += \
         main.c \
     lib.c \
-    fdb.c \
-    icmp6.c
+    ndisc.c \
+    table.c
 
 HEADERS += \
     proxy.h \
     lib.h \
-    fdb.h \
-    icmp6.h
+    ndisc.h \
+    table.h

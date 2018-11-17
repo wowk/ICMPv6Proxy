@@ -1,5 +1,5 @@
 all:
-	gcc *.c -o proxy -lpcap
+	gcc *.c -o proxy
 
 clean:
 	-rm -rf *.o proxy

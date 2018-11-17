@@ -10,6 +10,11 @@
 #include <error.h>
 #include <errno.h>
 #include <unistd.h>
+#include <ifaddrs.h>
+#include <sys/types.h>
+#include <sys/ioctl.h>
+#include <sys/timerfd.h>
+#include <sys/time.h>
 #include <arpa/inet.h>
 #include <net/if.h>
 #include <netinet/in.h>
@@ -17,10 +22,6 @@
 #include <netinet/icmp6.h>
 #include <netinet/ether.h>
 #include <sys/socket.h>
-#include <sys/types.h>
-#include <sys/ioctl.h>
-#include <sys/timerfd.h>
-#include <sys/time.h>
 #include <net/if_packet.h>
 #include <netpacket/packet.h>
 #include <linux/filter.h>
@@ -60,11 +61,11 @@ int parse_args(int argc, char **argv, struct proxy_args_t *args)
     }
 }
 
-int create_timer(struct port_t* port, unsigned interval)
+int create_timer(struct icmp6_proxy_t* proxy, unsigned interval)
 {
-    port->timerfd = timerfd_create(CLOCK_BOOTTIME, TFD_CLOEXEC|TFD_NONBLOCK);
-    if( port->timerfd < 0 ){
-        error(0, errno, "failed create timer for %s", port->ifname);
+    proxy->timerfd = timerfd_create(CLOCK_BOOTTIME, TFD_CLOEXEC|TFD_NONBLOCK);
+    if( proxy->timerfd < 0 ){
+        error(0, errno, "failed create timer");
         return -errno;
     }
 
@@ -75,9 +76,8 @@ int create_timer(struct port_t* port, unsigned interval)
         .it_value.tv_nsec = 0,
     };
 
-    if( 0 > timerfd_settime(port->timerfd, TFD_TIMER_ABSTIME, &its, NULL) ){
-        close(port->timerfd);
-        error(0, errno, "failed to set timer for %s", port->ifname);
+    if( 0 > timerfd_settime(proxy->timerfd, TFD_TIMER_ABSTIME, &its, NULL) ){
+        error(0, errno, "failed to set timer");
         return -errno;
     }
 
@@ -117,14 +117,46 @@ int create_raw_sock(struct port_t* port)
 
     if( 0 > setsockopt(port->rawsock, SOL_SOCKET, SO_BINDTODEVICE, port->ifname, sizeof(port->ifname)) ){
         error(0, errno, "failed to bind socket to device %s", port->ifname);
-        close(port->rawsock);
         return -errno;
     }
 
     return 0;
 }
 
-int gethwaddr(struct port_t* port)
+int create_icmp6_sock(struct port_t* port)
+{
+    port->icmp6sock = socket(PF_INET6, SOCK_RAW, IPPROTO_ICMPV6);
+    if( port->icmp6sock < 0 ){
+        error(0, errno, "failed to create icmp6 socket");
+        return -errno;
+    }
+
+    int loop_on = 0;
+    if( 0 > setsockopt(port->icmp6sock, SOL_IPV6, IPV6_MULTICAST_LOOP, &loop_on, sizeof(loop_on)) ){
+        error(0, errno, "failed to disbale multicast loop on %s", port->ifname);
+        return -errno;
+    }
+
+
+    struct ipv6_mreq mreq;
+    mreq.ipv6mr_interface = port->ifindex;
+    inet_pton(PF_INET6, "ff02::1", &mreq.ipv6mr_multiaddr);
+    if( 0 > setsockopt(port->icmp6sock, SOL_IPV6, IPV6_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) ){
+        error(0, errno, "failed to add multicast group ff02::1 on %s", port->ifname);
+        return -errno;
+    }
+
+    mreq.ipv6mr_interface = port->ifindex;
+    inet_pton(PF_INET6, "ff02::2", &mreq.ipv6mr_multiaddr);
+    if( 0 > setsockopt(port->icmp6sock, SOL_IPV6, IPV6_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) ){
+        error(0, errno, "failed to add multicast group ff02::2 on %s", port->ifname);
+        return -errno;
+    }
+
+    return 0;
+}
+
+int get_hw_addr(struct port_t* port)
 {
     struct ifreq ifr;
     memset(&ifr, 0, sizeof(ifr));
@@ -145,6 +177,46 @@ int gethwaddr(struct port_t* port)
     return 0;
 }
 
+int get_link_local_addr(struct port_t* port)
+{
+    bool found = false;
+    struct ifaddrs* ifp;
+    struct ifaddrs* ptr;
+    struct sockaddr_in6* si6;
+
+    if( 0 > getifaddrs(&ifp) ){
+        error(0, errno, "failed to get link local addresses");
+        return -errno;
+    }
+
+    while( ptr ){
+        if(ptr->ifa_addr->sa_family != PF_INET6){
+            ptr = ptr->ifa_next;
+            continue;
+        }
+        si6 = (struct sockaddr_in6*)ptr->ifa_addr;
+        if(!IN6_IS_ADDR_LINKLOCAL(&si6->sin6_addr)){
+            continue;
+        }
+        found = true;
+        break;
+    }
+
+    if(found){
+        memcpy(&port->addr, &si6->sin6_addr, sizeof(si6->sin6_addr));
+    }
+
+    freeifaddrs(ifp);
+
+    return found ? 0 : -1;
+}
+
+struct ether_header* eth_header(void* buffer, size_t* offset)
+{
+    *offset = 0;
+    return (struct ether_header*)buffer;
+}
+
 struct ip6_hdr* ipv6_header(void* buffer, size_t* offset)
 {
     *offset += sizeof(struct ether_header);
@@ -157,10 +229,10 @@ struct icmp6_hdr* icmp6_header(void* buffer, size_t* offset)
     struct ip6_hdr* hdr = (struct ip6_hdr*)buffer;
 
     if( hdr->ip6_nxt == IPPROTO_ICMPV6 ){
-        return (struct hdr*)(hdr + 1);
+        return (struct icmp6_hdr*)(hdr + 1);
     }
 
-    struct ip6_ext* ehdr = (struct ip6_hdr*)(hdr + 1);
+    struct ip6_ext* ehdr = (struct ip6_ext*)(hdr + 1);
     *offset += (ehdr->ip6e_len + sizeof(struct ip6_ext));
     while( ehdr->ip6e_nxt != 58 ){
         ehdr = (struct ip6_ext*)((void*)ehdr + ehdr->ip6e_len + sizeof(struct ip6_ext));
