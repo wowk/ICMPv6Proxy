@@ -1,5 +1,6 @@
 all:
-	gcc *.c -o proxy
+	gcc *.c -o proxy -g
+	cp proxy /tmp
 
 clean:
 	-rm -rf *.o proxy

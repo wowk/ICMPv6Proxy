@@ -59,13 +59,11 @@ int main(int argc, char** argv)
         cleanup_icmp6proxy(icmp6proxy);
         return -errno;
     }
-    shutdown(icmp6proxy->lan.icmp6sock, SHUT_RD);
 
     if( create_icmp6_sock(&icmp6proxy->wan) < 0 ){
         cleanup_icmp6proxy(icmp6proxy);
         return -errno;
     }
-    shutdown(icmp6proxy->lan.icmp6sock, SHUT_RD);
 
     if( get_hw_addr(&icmp6proxy->lan) < 0 ){
         cleanup_icmp6proxy(icmp6proxy);
@@ -102,13 +100,13 @@ int main(int argc, char** argv)
     FD_SET(icmp6proxy->lan.rawsock, &rfdset_save);
     FD_SET(icmp6proxy->wan.rawsock, &rfdset_save);
     FD_SET(icmp6proxy->timerfd, &rfdset_save);
-    FD_SET(icmp6proxy->lan.icmp6sock, &rfdset_save);
-    FD_SET(icmp6proxy->wan.icmp6sock, &rfdset_save);
+    //FD_SET(icmp6proxy->lan.icmp6sock, &rfdset_save);
+    //FD_SET(icmp6proxy->wan.icmp6sock, &rfdset_save);
 
     int max1 = max(icmp6proxy->lan.rawsock, icmp6proxy->wan.rawsock);
-    int max2 = max(icmp6proxy->lan.icmp6sock, icmp6proxy->wan.icmp6sock);
-    int max3 = max(max1, max2);
-    int maxfd = max(max3, icmp6proxy->timerfd);
+    //int max2 = max(icmp6proxy->lan.icmp6sock, icmp6proxy->wan.icmp6sock);
+    //int max3 = max(max1, max2);
+    int maxfd = max(max1, icmp6proxy->timerfd);
 
     icmp6proxy->running = true;
     while (icmp6proxy->running) {
@@ -150,10 +148,12 @@ int main(int argc, char** argv)
                 continue;
             }
             if(icmp6proxy->dad_proxy){
+                printf("update nd_table\n");
                 update_nd_table(&icmp6proxy->lan.nd_table);
                 update_nd_table(&icmp6proxy->wan.nd_table);
             }
             if(icmp6proxy->ra_proxy){
+                printf("handle ra proxy event\n");
                 ;
             }
 

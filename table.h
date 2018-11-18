@@ -1,8 +1,10 @@
 #ifndef ICMP6_PROXY_TABLE_H__
 #define ICMP6_PROXY_TABLE_H__
 
+
 #include <stdint.h>
 #include <netinet/in.h>
+#include <netinet/ether.h>
 #include <netinet/ether.h>
 #include <sys/queue.h>
 

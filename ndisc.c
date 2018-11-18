@@ -47,8 +47,9 @@ static void dump_icmp_pkt(struct port_t* port, struct icmp6* icmp6)
         type = "Other";
         break;
     }
-
-    printf("if: %s, from: %s, to: %s, type: %s\n", port->ifname, saddr, daddr, type);
+    char linkaddr[INET6_ADDRSTRLEN] = "";
+    inet_ntop(PF_INET6, &port->addr, linkaddr, sizeof(linkaddr));
+    printf("if: %s, linkaddr: %s, from: %s, to: %s, type: %s, ", port->ifname, linkaddr, saddr, daddr, type);
 }
 
 bool acceptable(struct port_t* port, struct icmp6* icmp6)
@@ -75,7 +76,7 @@ bool acceptable(struct port_t* port, struct icmp6* icmp6)
         return true;
     }else if(!memcmp(&icmp6->to, &port->addr, sizeof(port->addr))){
         return true;
-    }else if(IN6_IS_ADDR_UNSPECIFIED(&icmp6->from) && IN6_IS_ADDR_MULTICAST(&icmp6->to)){
+    }else if(IN6_IS_ADDR_UNSPECIFIED(&icmp6->from) && IN6_IS_ADDR_MC_LINKLOCAL(&icmp6->to)){
         return true;
     }
 
@@ -87,9 +88,10 @@ struct icmp6* parse_icmp6(void* pkt, size_t len)
     size_t tmp;
     size_t hdrlen;
     size_t offset;
-    struct ip6_hdr* ip6hdr = ipv6_header(pkt, &offset);
+    struct ether_header* ethdr = eth_header(pkt, &offset);
+    struct ip6_hdr* ip6hdr = ipv6_header(ethdr, &offset);
     struct icmp6_hdr* icmp6hdr = icmp6_header(ip6hdr, &offset);
-
+ 
     if( icmp6hdr->icmp6_type == ND_ROUTER_ADVERT ){
         hdrlen = sizeof(struct nd_router_advert);
     }else if( icmp6hdr->icmp6_type == ND_ROUTER_SOLICIT){
@@ -111,15 +113,17 @@ struct icmp6* parse_icmp6(void* pkt, size_t len)
         opt = (union icmp6_opt*)((void*)opt + opt->comm.nd_opt_len + sizeof(struct nd_opt_hdr));
         offset += (opt->comm.nd_opt_len + sizeof(struct nd_opt_hdr));
     }
+
     size_t size = sizeof(struct icmp6) + sizeof(union icmp6_opt) * count;
     struct icmp6* icmp6 = (struct icmp6*)malloc(size);
     icmp6->opt_cnt = count;
     if( !icmp6 ){
+        error(0, errno, "cant create icmp6 object\n");
         return NULL;
     }
 
-    memcpy(icmp6, pkt, hdrlen);
     offset = tmp;
+    memcpy(icmp6, icmp6hdr, hdrlen);
     for( size_t i = 0 ; i < count ; i ++ ){
         opt = (union icmp6_opt*)(pkt + offset);
         memcpy(&icmp6->opt[i], opt, opt->comm.nd_opt_len + sizeof(struct nd_opt_hdr));
@@ -129,7 +133,7 @@ struct icmp6* parse_icmp6(void* pkt, size_t len)
     memcpy(&icmp6->from, &ip6hdr->ip6_src, sizeof(ip6hdr->ip6_src));
     memcpy(&icmp6->to, &ip6hdr->ip6_dst, sizeof(ip6hdr->ip6_dst));
 
-    return 0;
+    return icmp6;
 }
 
 int disable_ra_if_got_same_prefix(struct icmp6* icmp6)
@@ -172,7 +176,8 @@ int send_ra(struct icmp6_proxy_t* proxy, struct icmp6* icmp6)
     struct sockaddr_in6 si6;
     memset(&si6, 0, sizeof(si6));
     si6.sin6_family     = PF_INET6;
-    memcpy(&si6.sin6_addr, &icmp6->to, sizeof(icmp6->to));
+    //memcpy(&si6.sin6_addr, &icmp6->to, sizeof(icmp6->to));
+    inet_pton(PF_INET6, "ff02::1", &si6.sin6_addr);
 
     struct msghdr msghdr;
     memset(&msghdr, 0, sizeof(msghdr));
@@ -183,7 +188,9 @@ int send_ra(struct icmp6_proxy_t* proxy, struct icmp6* icmp6)
 
     ssize_t retlen;
     while( 0 > (retlen = sendmsg(proxy->lan.icmp6sock, &msghdr, 0)) && errno == EINTR);
-
+    if( retlen < 0 ){
+        error(0, errno, "failed to forward ICMPv6 packet\n");
+    }
     return retlen;
 }
 
@@ -219,12 +226,15 @@ int handle_wan_side(struct icmp6_proxy_t* proxy, void* pkt, size_t len)
     if(!icmp6){
         return 0;
     }else if(!acceptable(&proxy->wan, icmp6)){
+        printf("denied\n");
         goto RETURN;
     }
 
     int ret = 0;
 
+    dump_icmp_pkt(&proxy->wan, icmp6);
     if( icmp6->comm.icmp6_type == ND_ROUTER_ADVERT && proxy->ra_proxy ){
+        printf("forward RA\n");
         ret = send_ra(proxy, icmp6);
     }else if( icmp6->comm.icmp6_type == ND_NEIGHBOR_SOLICIT && proxy->dad_proxy ){
         /* icmp6->ns.nd_ns_target is at wan side, we dont care */
@@ -287,6 +297,7 @@ int handle_lan_side(struct icmp6_proxy_t* proxy, void* pkt, size_t len)
         goto RETURN;
     }
 
+    dump_icmp_pkt(&proxy->lan, icmp6);
     if(icmp6->comm.icmp6_type == ND_NEIGHBOR_SOLICIT && proxy->dad_proxy){
         struct nd_table_entry_t* entry = NULL;
         /* if NS packet from LAN side */

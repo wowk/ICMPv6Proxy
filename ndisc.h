@@ -4,6 +4,7 @@
 #include "table.h"
 #include "proxy.h"
 #include <netinet/icmp6.h>
+#include <netinet/ether.h>
 
 struct nd_opt_linkaddr{
     uint8_t  nd_opt_type;

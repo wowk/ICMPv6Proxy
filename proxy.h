@@ -27,7 +27,7 @@ struct port_t {
     uint8_t ifindex;
     char ifname[IF_NAMESIZE];
     struct ether_addr mac;
-    struct sockaddr_in6 addr;
+    struct in6_addr addr;
     struct nd_table_t  nd_table;
 };
 

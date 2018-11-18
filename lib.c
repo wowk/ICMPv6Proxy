@@ -63,7 +63,7 @@ int parse_args(int argc, char **argv, struct proxy_args_t *args)
 
 int create_timer(struct icmp6_proxy_t* proxy, unsigned interval)
 {
-    proxy->timerfd = timerfd_create(CLOCK_BOOTTIME, TFD_CLOEXEC|TFD_NONBLOCK);
+    proxy->timerfd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC|TFD_NONBLOCK);
     if( proxy->timerfd < 0 ){
         error(0, errno, "failed create timer");
         return -errno;
@@ -131,6 +131,11 @@ int create_icmp6_sock(struct port_t* port)
         return -errno;
     }
 
+    if( 0 > setsockopt(port->icmp6sock, SOL_SOCKET, SO_BINDTODEVICE, port->ifname, strlen(port->ifname)) ){
+        error(0, errno, "failed to bind socket to device %s", port->ifname);
+        return -errno;
+    }
+
     int loop_on = 0;
     if( 0 > setsockopt(port->icmp6sock, SOL_IPV6, IPV6_MULTICAST_LOOP, &loop_on, sizeof(loop_on)) ){
         error(0, errno, "failed to disbale multicast loop on %s", port->ifname);
@@ -180,7 +185,7 @@ int get_hw_addr(struct port_t* port)
 int get_link_local_addr(struct port_t* port)
 {
     bool found = false;
-    struct ifaddrs* ifp;
+    struct ifaddrs* ifp = NULL;
     struct ifaddrs* ptr;
     struct sockaddr_in6* si6;
 
@@ -188,9 +193,17 @@ int get_link_local_addr(struct port_t* port)
         error(0, errno, "failed to get link local addresses");
         return -errno;
     }
-    
+
     ptr = ifp;
     while( ptr ){
+        if( !ptr->ifa_name || strcmp(ptr->ifa_name, port->ifname) ){
+            ptr = ptr->ifa_next;
+            continue;
+        }
+        if(!ptr->ifa_addr){
+            ptr = ptr->ifa_next;
+            continue;
+        }
         if(ptr->ifa_addr->sa_family != PF_INET6){
             ptr = ptr->ifa_next;
             continue;
@@ -210,6 +223,10 @@ int get_link_local_addr(struct port_t* port)
 
     freeifaddrs(ifp);
 
+    char ip6addr[128] = "";
+    inet_ntop(PF_INET6, &port->addr, ip6addr, sizeof(ip6addr));
+    printf("%s's linklocal address = %s\n", port->ifname, ip6addr);
+
     return found ? 0 : -1;
 }
 
@@ -227,7 +244,7 @@ struct ip6_hdr* ipv6_header(void* buffer, size_t* offset)
 
 struct icmp6_hdr* icmp6_header(void* buffer, size_t* offset)
 {
-    *offset = sizeof(struct ip6_hdr);
+    *offset += sizeof(struct ip6_hdr);
     struct ip6_hdr* hdr = (struct ip6_hdr*)buffer;
 
     if( hdr->ip6_nxt == IPPROTO_ICMPV6 ){
