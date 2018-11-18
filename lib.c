@@ -188,7 +188,8 @@ int get_link_local_addr(struct port_t* port)
         error(0, errno, "failed to get link local addresses");
         return -errno;
     }
-
+    
+    ptr = ifp;
     while( ptr ){
         if(ptr->ifa_addr->sa_family != PF_INET6){
             ptr = ptr->ifa_next;
@@ -196,6 +197,7 @@ int get_link_local_addr(struct port_t* port)
         }
         si6 = (struct sockaddr_in6*)ptr->ifa_addr;
         if(!IN6_IS_ADDR_LINKLOCAL(&si6->sin6_addr)){
+            ptr = ptr->ifa_next;
             continue;
         }
         found = true;
