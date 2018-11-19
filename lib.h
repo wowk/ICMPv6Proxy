@@ -16,5 +16,6 @@ extern ssize_t recv_pkt(struct port_t* port, void* buf, size_t len);
 extern ssize_t send_pkt(struct port_t* port, struct in6_addr* to, size_t iovec_count, ...);
 extern int get_hw_addr(struct port_t* port);
 extern int get_link_local_addr(struct port_t* port);
+extern bool is_self_addr(struct in6_addr* addr);
 
 #endif

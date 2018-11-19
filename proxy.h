@@ -28,6 +28,7 @@ struct port_t {
     char ifname[IF_NAMESIZE];
     struct ether_addr mac;
     struct in6_addr addr;
+    struct in6_addr maddr;
     struct nd_table_t  nd_table;
 };
 

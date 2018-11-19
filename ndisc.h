@@ -6,13 +6,13 @@
 #include <netinet/icmp6.h>
 #include <netinet/ether.h>
 
-struct nd_opt_linkaddr{
+struct nd_opt_linkaddr {
     uint8_t  nd_opt_type;
     uint8_t  nd_opt_len;
     struct ether_addr addr;
-} __attribute__((packed));
+} __attribute__((__packed__));
 
-union icmp6_opt{
+union icmp6_opt {
     struct nd_opt_hdr comm;
     struct nd_opt_prefix_info prefix;
     struct nd_opt_mtu mtu;
@@ -27,7 +27,6 @@ struct icmp6 {
         struct nd_neighbor_solicit ns;
         struct nd_neighbor_advert na;
         struct icmp6_hdr comm;
-        uint8_t space[256];
     };
     size_t len;
     size_t opt_cnt;
