@@ -169,6 +169,12 @@ int create_icmp6_sock(struct port_t* port)
         return -errno;
     }
 
+    int outgoing_if = port->ifindex;
+    if( 0 > setsockopt(port->icmp6sock, SOL_IPV6, IPV6_MULTICAST_IF, &outgoing_if, sizeof(outgoing_if))){
+        error(0, errno, "failed to bind outgoing multicast outgoing if");
+        return -errno;
+    }
+
     return 0;
 }
 
@@ -277,7 +283,9 @@ bool is_self_addr(struct in6_addr* addr)
     }
 
     freeifaddrs(ifp);
-    printf("is address on port? %s\n", found ? "true" : "false");
+    if( found ){
+        printf("from self, ignore it\n");
+    }
 
     return found;
 }
@@ -313,7 +321,7 @@ struct icmp6_hdr* icmp6_header(void* buffer, size_t* offset)
     return (struct icmp6_hdr*)((void*)ehdr + ehdr->ip6e_len + sizeof(struct ip6_ext));
 }
 
-ssize_t recv_pkt(struct port_t* port, void* buf, size_t len)
+ssize_t recv_raw_pkt(struct port_t* port, void* buf, size_t len)
 {
     ssize_t ret;
 
@@ -324,10 +332,45 @@ ssize_t recv_pkt(struct port_t* port, void* buf, size_t len)
     return ret;
 }
 
-ssize_t send_pkt(struct port_t* port, struct in6_addr* to, size_t iovec_count, ...)
+ssize_t send_raw_pkt(struct port_t* port, struct in6_addr* to, size_t iovec_count, ...)
 {
     ssize_t ret;
-    uint8_t cbuf[sizeof(struct in6_pktinfo) + sizeof(struct cmsghdr)];
+    uint8_t cbuf[sizeof(struct cmsghdr)];
+    struct msghdr msghdr;
+    struct sockaddr_ll si6;
+    struct iovec iovec[iovec_count];
+    va_list val;
+
+    va_start(val, iovec_count);
+    for( size_t i = 0 ; i < iovec_count ; i ++ ) {
+        iovec[i].iov_base   = va_arg(val, void*);
+        iovec[i].iov_len    = va_arg(val, size_t);
+    }
+    va_end(val);
+
+    si6.sll_family  = PF_PACKET;
+    si6.sll_ifindex = port->ifindex;
+
+    memset(&cbuf, 0, sizeof(cbuf));
+    msghdr.msg_iov          = iovec;
+    msghdr.msg_iovlen       = iovec_count;
+    msghdr.msg_control      = NULL;
+    msghdr.msg_controllen   = 0;
+    msghdr.msg_flags        = 0;
+    msghdr.msg_name         = &si6;
+    msghdr.msg_namelen      = sizeof(si6);
+
+    do {
+        ret = sendmsg(port->rawsock, &msghdr, 0);
+    } while( ret < 0 && errno == EINTR);
+
+    return ret;
+}
+
+ssize_t send_icmp6_pkt(struct port_t* port, struct in6_addr* to, size_t iovec_count, ...)
+{
+    ssize_t ret;
+    uint8_t cbuf[sizeof(struct cmsghdr)];
     struct msghdr msghdr;
     struct sockaddr_in6 si6;
     struct iovec iovec[iovec_count];
@@ -360,3 +403,29 @@ ssize_t send_pkt(struct port_t* port, struct in6_addr* to, size_t iovec_count, .
     return ret;
 }
 
+
+uint32_t checksum_partial(void* data, size_t len, uint32_t sum)
+{
+    const uint16_t* p16 = (uint16_t*)data;
+
+    while(len >= sizeof(uint16_t)){
+        sum += *p16 ++;
+        len -= sizeof(uint16_t);
+    }
+
+    const uint8_t* p8 = (uint8_t*)p16;
+    if( len > 0 ){
+        sum += ((*p8) << 8) ;
+    }
+
+    return sum;
+}
+
+uint16_t checksum_fold(uint32_t sum)
+{
+    while(sum & 0xffff0000U){
+        sum = (sum >> 16) + (sum&0xffffU);
+    }
+
+    return ~sum;
+}

@@ -3,7 +3,7 @@
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
-
+#include <arpa/inet.h>
 #include <stdio.h>
 #include <netinet/in.h>
 

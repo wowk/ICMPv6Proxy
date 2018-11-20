@@ -3,6 +3,7 @@
 
 #include "table.h"
 #include "proxy.h"
+#include <netinet/ip6.h>
 #include <netinet/icmp6.h>
 #include <netinet/ether.h>
 
@@ -30,8 +31,8 @@ struct icmp6 {
     };
     size_t len;
     size_t opt_cnt;
-    struct in6_addr from;
-    struct in6_addr to;
+    struct ip6_hdr ip6hdr;
+    struct ether_header ethdr;
     union icmp6_opt opt[0];
 };
 

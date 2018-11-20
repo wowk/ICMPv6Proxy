@@ -125,17 +125,16 @@ int main(int argc, char** argv)
         }
 
         if( FD_ISSET(icmp6proxy->lan.rawsock, &rfdset) ) {
-            retlen = recv_pkt(&icmp6proxy->lan, pktbuf, sizeof(pktbuf));
+            retlen = recv_raw_pkt(&icmp6proxy->lan, pktbuf, sizeof(pktbuf));
             if( 0 > retlen ) {
                 error(0, errno, "failed to read icmp6 packet from lan");
                 break;
             }
-            printf("recved\n");
             handle_lan_side(icmp6proxy, pktbuf, retlen);
         }
 
         if( FD_ISSET(icmp6proxy->wan.rawsock, &rfdset) ) {
-            retlen = recv_pkt(&icmp6proxy->wan, pktbuf, sizeof(pktbuf));
+            retlen = recv_raw_pkt(&icmp6proxy->wan, pktbuf, sizeof(pktbuf));
             if( 0 > retlen ) {
                 error(0, errno, "failed to read icmp6 packet from wan");
                 break;
