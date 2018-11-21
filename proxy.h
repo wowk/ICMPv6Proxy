@@ -16,6 +16,7 @@ struct proxy_args_t {
     char wan_ifname[IF_NAMESIZE];
     char lan_ifname[IF_NAMESIZE];
     bool debug;
+    bool foreground;
     bool ra_proxy;
     bool dad_proxy;
     unsigned aging_time;

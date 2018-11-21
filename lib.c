@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 
+#include "debug.h"
 #include "lib.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,7 +8,6 @@
 #include <stdbool.h>
 #include <stdarg.h>
 #include <getopt.h>
-#include <error.h>
 #include <errno.h>
 #include <unistd.h>
 #include <ifaddrs.h>
@@ -27,6 +27,42 @@
 #include <linux/filter.h>
 
 
+int create_pid_file(const char* app_name)
+{
+	FILE* fp = NULL;
+    pid_t pid;
+	char pid_file[128] = "";
+
+    snprintf(pid_file, sizeof(pid_file), "/var/run/%s.pid", app_name);
+    if ( access(pid_file, R_OK)  < 0 ) {
+        info("create pid file %s", app_name);
+        fp = fopen(pid_file, "w");
+    } else {
+        info("found pid file");
+        fp = fopen(pid_file, "rw");
+        fscanf(fp, "%u", &pid);
+        char process[32] = "";
+        snprintf(process, sizeof(process), "/proc/%u/cmdline", (unsigned)pid);
+        if ( access(process, R_OK) == 0 ) {
+            error(0, EEXIST, "a %s process is running", app_name);
+            return -EEXIST;
+        } else {
+            fclose(fp);
+            fp = fopen(pid_file, "w");
+            info("process logged in pid file is not exist: %s", process);
+        }
+    }
+    if ( !fp ) {
+        error(0, errno, "cant create pid file %s", pid_file);
+        return -errno;
+    }
+
+    fprintf(fp, "%u", (unsigned)getpid());
+    fclose(fp);
+
+	return 0;
+}
+
 int parse_args(int argc, char **argv, struct proxy_args_t *args)
 {
     memset(args, 0, sizeof(*args));
@@ -36,6 +72,9 @@ int parse_args(int argc, char **argv, struct proxy_args_t *args)
         switch (op) {
         case 'l':
             strcpy(args->lan_ifname,optarg);
+            break;
+        case 'f':
+            args->foreground = true;
             break;
         case 'w':
             strcpy(args->wan_ifname,optarg);

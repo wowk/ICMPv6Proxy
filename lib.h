@@ -3,6 +3,7 @@
 
 #include "proxy.h"
 
+extern int create_pid_file(const char* app_name);
 extern int parse_args(int argc, char** argv, struct proxy_args_t* args);
 
 extern int create_timer(struct icmp6_proxy_t* proxy, unsigned interval);

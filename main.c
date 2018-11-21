@@ -37,6 +37,17 @@ int main(int argc, char** argv)
         error(1, errno, "failed to create icmp6proxy object");
     }
 
+    if( !args.foreground ){
+        if( daemon(0, 0) < 0 ){
+            error(0, errno, "cant put %s into background", argv[0]);
+            return -errno;
+        }
+    }
+
+    int ret = create_pid_file(argv[0]);
+    if( ret < 0 ){
+        return 0;
+    }
     icmp6proxy->timeout     = args.ra_interval ?: 1;
     icmp6proxy->aging_time  = args.aging_time ?: 150;
     icmp6proxy->ra_proxy    = args.ra_proxy;
@@ -50,7 +61,6 @@ int main(int argc, char** argv)
     strcpy(icmp6proxy->wan.ifname, args.wan_ifname);
     LIST_INIT(&icmp6proxy->lan.nd_table);
     LIST_INIT(&icmp6proxy->wan.nd_table);
-
 
     if( create_raw_sock(&icmp6proxy->lan) < 0 ) {
         cleanup_icmp6proxy(icmp6proxy);
@@ -87,7 +97,6 @@ int main(int argc, char** argv)
         return -errno;
     }
 
-    int ret;
     ssize_t retlen;
     fd_set rfdset;
     fd_set rfdset_save;
