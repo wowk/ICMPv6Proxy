@@ -52,7 +52,7 @@ int add_nd_table_entry(struct port_t* port, struct in6_addr* addr, struct ether_
 
     find_nd_table_entry(port, addr, &pentry);
     if( !pentry ) {
-        pentry = (struct nd_table_entry_t*)malloc(sizeof(struct nd_table_entry_t));
+        pentry = (struct nd_table_entry_t*)calloc(1,sizeof(struct nd_table_entry_t));
         if( !pentry ) {
             error(0, 1, "\t\tfailed to create new nd_table entry");
             return -errno;
@@ -108,7 +108,7 @@ int update_nd_table(struct port_t* port, unsigned passed_time)
     deleted = NULL;
     LIST_FOREACH(pentry, &port->nd_table, entry){
         if( deleted ){
-            LIST_REMOVE(pentry, entry);
+            LIST_REMOVE(deleted, entry);
             delete_host_route_rule(port, &deleted->addr);
             free(deleted);
             deleted = NULL;
@@ -127,7 +127,7 @@ int update_nd_table(struct port_t* port, unsigned passed_time)
     }
 
     if( deleted ){
-        LIST_REMOVE(pentry, entry);
+        LIST_REMOVE(deleted, entry);
         delete_host_route_rule(port, &deleted->addr);
         free(deleted);
         deleted = NULL;
