@@ -84,6 +84,36 @@ int create_timer(struct icmp6_proxy_t* proxy, unsigned interval)
     return 0;
 }
 
+int join_multicast(struct port_t* port, const char* mc_group)
+ {
+     struct ipv6_mreq mreq;
+
+     mreq.ipv6mr_interface   = port->ifindex;
+     inet_pton(AF_INET6, mc_group, &mreq.ipv6mr_multiaddr);
+
+     if( 0 > setsockopt(port->rawsock, SOL_IPV6, IPV6_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) ){
+         error(0, errno, "failed to join multicast group %s", mc_group);
+         return -errno;
+     }
+
+     return 0;
+ }
+
+ int leave_multicast(struct port_t* port, const char* mc_group)
+ {
+     struct ipv6_mreq mreq;
+
+     mreq.ipv6mr_interface   = port->ifindex;
+     inet_pton(AF_INET6, mc_group, &mreq.ipv6mr_multiaddr);
+
+     if( 0 > setsockopt(port->rawsock, SOL_IPV6, IPV6_DROP_MEMBERSHIP, &mreq, sizeof(mreq)) ){
+         error(0, errno, "failed to leave multicast group %s", mc_group);
+         return -errno;
+     }
+
+     return 0;
+ }
+
 int create_raw_sock(struct port_t* port)
 {
     /* bpf filter to capture all icmpv6 packets */
@@ -125,7 +155,7 @@ int create_raw_sock(struct port_t* port)
     ll.sll_family   = PF_PACKET;
     ll.sll_ifindex  = port->ifindex;
     ll.sll_protocol = htons(ETH_P_IPV6);
-    ll.sll_pkttype  = PACKET_HOST|PACKET_MULTICAST|PACKET_OTHERHOST|PACKET_MR_PROMISC;
+    ll.sll_pkttype  = 0;
 
     if(0 > bind(port->rawsock, (struct sockaddr*)&ll, sizeof(ll))) {
         error(0, errno, "failed to bind socket to %s", port->ifname);
@@ -154,26 +184,14 @@ int create_icmp6_sock(struct port_t* port)
         return -errno;
     }
 
-    struct ipv6_mreq mreq;
-    mreq.ipv6mr_interface = port->ifindex;
-    inet_pton(PF_INET6, "ff02::1", &mreq.ipv6mr_multiaddr);
-    if( 0 > setsockopt(port->icmp6sock, SOL_IPV6, IPV6_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) ) {
-        error(0, errno, "failed to add multicast group ff02::1 on %s", port->ifname);
-        return -errno;
-    }
+    //join_multicast(port, "ff02::1");
+    //join_multicast(port, "ff02::2");
 
-    mreq.ipv6mr_interface = port->ifindex;
-    inet_pton(PF_INET6, "ff02::2", &mreq.ipv6mr_multiaddr);
-    if( 0 > setsockopt(port->icmp6sock, SOL_IPV6, IPV6_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) ) {
-        error(0, errno, "failed to add multicast group ff02::2 on %s", port->ifname);
-        return -errno;
-    }
-
-    int outgoing_if = port->ifindex;
-    if( 0 > setsockopt(port->icmp6sock, SOL_IPV6, IPV6_MULTICAST_IF, &outgoing_if, sizeof(outgoing_if))){
-        error(0, errno, "failed to bind outgoing multicast outgoing if");
-        return -errno;
-    }
+//    int outgoing_if = port->ifindex;
+//    if( 0 > setsockopt(port->icmp6sock, SOL_IPV6, IPV6_MULTICAST_IF, &outgoing_if, sizeof(outgoing_if))){
+//        error(0, errno, "failed to bind outgoing multicast outgoing if");
+//        return -errno;
+//    }
 
     return 0;
 }

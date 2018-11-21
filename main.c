@@ -10,6 +10,7 @@
 #include <getopt.h>
 #include <errno.h>
 #include <error.h>
+#include <signal.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <netinet/ip6.h>
@@ -167,6 +168,15 @@ int main(int argc, char** argv)
 
 void cleanup_icmp6proxy(struct icmp6_proxy_t* proxy)
 {
+    leave_multicast(&proxy->lan, "ff02::1");
+    leave_multicast(&proxy->lan, "ff02::2");
+    leave_multicast(&proxy->wan, "ff02::1");
+    leave_multicast(&proxy->wan, "ff02::2");
+    close(proxy->lan.icmp6sock);
+    close(proxy->wan.icmp6sock);
+
+    setsockopt(proxy->wan.rawsock, SOL_SOCKET, SO_DETACH_FILTER, NULL, 0);
+    setsockopt(proxy->wan.rawsock, SOL_SOCKET, SO_DETACH_FILTER, NULL, 0);
     close(proxy->wan.rawsock);
     close(proxy->lan.rawsock);
 }

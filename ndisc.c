@@ -1,11 +1,10 @@
 #include "ndisc.h"
 #include "lib.h"
 #include "table.h"
-//#include "debug.h"
+#include "debug.h"
 #include "proxy.h"
 #include <stdio.h>
 #include <stdlib.h>
-#include <error.h>
 #include <errno.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -52,17 +51,30 @@ static void dump_icmp_pkt(struct port_t* port, struct icmp6* icmp6)
     char linkaddr[INET6_ADDRSTRLEN] = "";
     inet_ntop(PF_INET6, &port->addr, linkaddr, sizeof(linkaddr));
     printf("if: %s, portaddr: %s, from: %s, to: %s, type: %s\n", port->ifname, linkaddr, saddr, daddr, type);
+    char src_mac[18] = "";
+    char dst_mac[18] = "";
+    ether_ntoa_r((struct ether_addr*)icmp6->ethdr.ether_shost, src_mac);
+    ether_ntoa_r((struct ether_addr*)icmp6->ethdr.ether_dhost, dst_mac);
+    printf("\tsrc mac: %s, dst mac: %s\n", src_mac, dst_mac);
 }
 
-bool acceptable(struct icmp6_hdr* icmp6)
+bool acceptable(struct icmp6_proxy_t* proxy, struct icmp6* icmp6)
 {
-    switch (icmp6->icmp6_type) {
+    switch (icmp6->comm.icmp6_type) {
     case ND_NEIGHBOR_SOLICIT:
     case ND_NEIGHBOR_ADVERT:
     case ND_ROUTER_SOLICIT:
     case ND_ROUTER_ADVERT:
         break;
     default:
+        return false;
+    }
+
+    if(!memcmp(&proxy->lan.mac, icmp6->ethdr.ether_shost, sizeof(icmp6->ethdr.ether_shost))){
+        return false;
+    }else if(!memcmp(&proxy->wan.mac, icmp6->ethdr.ether_shost, sizeof(icmp6->ethdr.ether_shost))){
+        return false;
+    }else if(icmp6->ethdr.ether_shost[0] == 0x33 && icmp6->ethdr.ether_shost[1] == 0x33){
         return false;
     }
 
@@ -96,6 +108,7 @@ struct icmp6* parse_icmp6(void* pkt, size_t len)
     struct ether_header* ethdr = eth_header(pkt, &offset);
     struct ip6_hdr* ip6hdr = ipv6_header(ethdr, &offset);
     struct icmp6_hdr* icmp6hdr = icmp6_header(ip6hdr, &offset);
+    static uint8_t buffer[1520];
 
     if( icmp6hdr->icmp6_type == ND_ROUTER_ADVERT ) {
         hdrlen = sizeof(struct nd_router_advert);
@@ -119,8 +132,8 @@ struct icmp6* parse_icmp6(void* pkt, size_t len)
         offset += opt->comm.nd_opt_len * 8;
     }
 
-    size_t size = sizeof(struct icmp6) + sizeof(union icmp6_opt) * count;
-    struct icmp6* icmp6 = (struct icmp6*)malloc(size);
+    struct icmp6* icmp6 = (struct icmp6*)buffer;
+
     icmp6->opt_cnt = count;
     if( !icmp6 ) {
         error(0, errno, "cant create icmp6 object\n");
@@ -176,19 +189,18 @@ int send_ra(struct port_t* port, struct icmp6* icmp6)
     for( size_t i = 0 ; i < icmp6->opt_cnt ; i ++ ) {
         iovec[i+1].iov_base = &icmp6->opt[i];
         iovec[i+1].iov_len  = icmp6->opt[i].comm.nd_opt_len * 8;
-        if( icmp6->opt[i].comm.nd_opt_type == ND_OPT_PREFIX_INFORMATION ){
-            char ip6addr[INET6_ADDRSTRLEN] = "";
-            inet_ntop(PF_INET6, &icmp6->opt[i].prefix.nd_opt_pi_prefix, ip6addr, sizeof(ip6addr));
-            char command[256] = "";
-            snprintf(command, sizeof(command), "ip -6 route add %s/%u dev br0", ip6addr, icmp6->opt[i].prefix.nd_opt_pi_prefix_len);
-            system(command);
-        }
+//        if( icmp6->opt[i].comm.nd_opt_type == ND_OPT_PREFIX_INFORMATION ){
+//            char ip6addr[INET6_ADDRSTRLEN] = "";
+//            inet_ntop(PF_INET6, &icmp6->opt[i].prefix.nd_opt_pi_prefix, ip6addr, sizeof(ip6addr));
+//            char command[256] = "";
+//            snprintf(command, sizeof(command), "ip -6 route add %s/%u dev br0", ip6addr, icmp6->opt[i].prefix.nd_opt_pi_prefix_len);
+//            system(command);
+//        }
     }
 
     struct sockaddr_in6 si6;
     memset(&si6, 0, sizeof(si6));
     si6.sin6_family     = PF_INET6;
-    //memcpy(&si6.sin6_addr, &icmp6->to, sizeof(icmp6->to));
     inet_pton(PF_INET6, "ff02::1", &si6.sin6_addr);
 
     struct msghdr msghdr;
@@ -221,10 +233,12 @@ int send_na(struct port_t* port, struct icmp6* icmp6, struct in6_addr* target, s
     struct nd_neighbor_advert na;
     struct nd_opt_linkaddr opt_linkaddr;
 
+    /* make ethernet header */
     ethdr.ether_type    = htons(ETHERTYPE_IPV6);
     memcpy(&ethdr.ether_shost, linkaddr, sizeof(*linkaddr));
     memcpy(&ethdr.ether_dhost, &icmp6->ethdr.ether_shost, sizeof(icmp6->ethdr.ether_shost));
 
+    /* make ipv6 header */
     memset(&ip6hdr, 0, sizeof(ip6hdr));
     ip6hdr.ip6_vfc      = icmp6->ip6hdr.ip6_vfc;
     ip6hdr.ip6_flow     = icmp6->ip6hdr.ip6_flow;
@@ -234,22 +248,25 @@ int send_na(struct port_t* port, struct icmp6* icmp6, struct in6_addr* target, s
     memcpy(&ip6hdr.ip6_dst, &icmp6->ip6hdr.ip6_src, sizeof(icmp6->ip6hdr.ip6_src));
     memcpy(&ip6hdr.ip6_src, target, sizeof(*target));
 
+    /* make icmpv6 header */
     na.nd_na_type   = ND_NEIGHBOR_ADVERT;
     na.nd_na_code   = 0;
     na.nd_na_cksum  = 0;
-    na.nd_na_flags_reserved = 0;//ND_NA_FLAG_ROUTER;
-    na.nd_na_flags_reserved |= ND_NA_FLAG_SOLICITED|ND_NA_FLAG_OVERRIDE;
+    na.nd_na_flags_reserved |= ND_NA_FLAG_ROUTER|ND_NA_FLAG_OVERRIDE;
     if( IN6_IS_ADDR_MULTICAST(target) ){
         na.nd_na_flags_reserved |= ND_NA_FLAG_SOLICITED;
     }
     memcpy(&na.nd_na_target, target, sizeof(*target));
 
+    /* add target link option */
     opt_linkaddr.nd_opt_type    = ND_OPT_TARGET_LINKADDR;
     opt_linkaddr.nd_opt_len     = sizeof(opt_linkaddr) >> 3;
     memcpy(&opt_linkaddr.addr, linkaddr, sizeof(*linkaddr));
+
     /*
-    * [RFC 2460 Section 8.1 ] fake header
-    * [RFC 4443 Section 2.3 ] Message Checksum Calculation
+     * calculate ICMPv6's checksum
+     * [RFC 2460 Section 8.1 ] fake header
+     * [RFC 4443 Section 2.3 ] Message Checksum Calculation
     */
     struct{
         struct in6_addr src;
@@ -275,6 +292,7 @@ int send_na(struct port_t* port, struct icmp6* icmp6, struct in6_addr* target, s
     sum = checksum_partial(&payload, sizeof(payload), sum);
     na.nd_na_cksum = checksum_fold(sum);
 
+    /* send packet to link layer */
     return send_raw_pkt(port, &icmp6->ip6hdr.ip6_src, 4,
                     &ethdr, sizeof(ethdr),
                     &ip6hdr, sizeof(ip6hdr),
@@ -282,7 +300,7 @@ int send_na(struct port_t* port, struct icmp6* icmp6, struct in6_addr* target, s
                     &opt_linkaddr, sizeof(opt_linkaddr));
 }
 
-int send_ns(struct port_t* port, struct icmp6* icmp, struct in6_addr* target)
+int send_ns(struct port_t* port, struct icmp6* icmp6, struct in6_addr* target)
 {
     struct nd_neighbor_solicit ns;
     struct nd_opt_linkaddr opt_linkaddr;
@@ -309,23 +327,86 @@ int send_ns(struct port_t* port, struct icmp6* icmp, struct in6_addr* target)
     }
 
     return send_icmp6_pkt(port, &dstaddr, 2, &ns, sizeof(ns), &opt_linkaddr, sizeof(opt_linkaddr));
+
+//    struct ether_header ethdr;
+//    struct ip6_hdr ip6hdr;
+//    struct nd_neighbor_solicit ns;
+//    struct nd_opt_linkaddr opt_linkaddr;
+
+//    ethdr.ether_type    = htons(ETHERTYPE_IPV6);
+//    memcpy(&ethdr.ether_shost, &port->mac, sizeof(port->mac));
+//    memcpy(&ethdr.ether_dhost, &icmp6->ethdr.ether_dhost, sizeof(icmp6->ethdr.ether_shost));
+
+//    memset(&ip6hdr, 0, sizeof(ip6hdr));
+//    ip6hdr.ip6_vfc      = icmp6->ip6hdr.ip6_vfc;
+//    ip6hdr.ip6_flow     = icmp6->ip6hdr.ip6_flow;
+//    ip6hdr.ip6_plen     = htons(sizeof(ns) + sizeof(opt_linkaddr));
+//    ip6hdr.ip6_nxt      = IPPROTO_ICMPV6;
+//    ip6hdr.ip6_hlim     = 255;
+
+//    struct in6_addr dstaddr;
+//    inet_pton(PF_INET6, "ff02::01:ff:00:00:00", &dstaddr);
+//    memcpy(dstaddr.s6_addr + 13, target->s6_addr + 13, 3);
+//    memcpy(&ip6hdr.ip6_dst, &dstaddr, sizeof(dstaddr));
+//    memcpy(&ip6hdr.ip6_src, &icmp6->ip6hdr.ip6_src, sizeof(icmp6->ip6hdr.ip6_src));
+
+//    ns.nd_ns_type   = ND_NEIGHBOR_SOLICIT;
+//    ns.nd_ns_code   = 0;
+//    ns.nd_ns_cksum  = 0;
+//    ns.nd_ns_reserved = 0;
+//    memcpy(&ns.nd_ns_target, target, sizeof(*target));
+
+//    opt_linkaddr.nd_opt_type    = ND_OPT_SOURCE_LINKADDR;
+//    opt_linkaddr.nd_opt_len     = sizeof(opt_linkaddr) >> 3;
+//    memcpy(&opt_linkaddr.addr, &port->mac, sizeof(port->mac));
+//    /*
+//    * [RFC 2460 Section 8.1 ] fake header
+//    * [RFC 4443 Section 2.3 ] Message Checksum Calculation
+//    */
+//    struct{
+//        struct in6_addr src;
+//        struct in6_addr dst;
+//        uint32_t plen;
+//        uint8_t pad[3];
+//        uint8_t nxthdr;
+//    } __attribute__((__packed__)) pseudo_hdr;
+//    memcpy(&pseudo_hdr.src , &ip6hdr.ip6_src, sizeof(ip6hdr.ip6_src));
+//    memcpy(&pseudo_hdr.dst, &ip6hdr.ip6_dst, sizeof(ip6hdr.ip6_dst));
+//    pseudo_hdr.plen    = htonl(sizeof(ns) + sizeof(opt_linkaddr));
+//    pseudo_hdr.nxthdr  = IPPROTO_ICMPV6;
+//    pseudo_hdr.pad[0] = pseudo_hdr.pad[1] = pseudo_hdr.pad[2] = 0;
+
+//    struct {
+//        struct nd_neighbor_advert na;
+//        struct nd_opt_linkaddr linkaddr;
+//    } __attribute__((__packed__)) payload;
+//    memcpy(&payload.na, &ns, sizeof(ns));
+//    memcpy(&payload.linkaddr, &opt_linkaddr, sizeof(opt_linkaddr));
+
+//    uint64_t sum = checksum_partial(&pseudo_hdr, sizeof(pseudo_hdr), 0);
+//    sum = checksum_partial(&payload, sizeof(payload), sum);
+//    ns.nd_ns_cksum = checksum_fold(sum);
+
+//    return send_raw_pkt(port, &ip6hdr.ip6_dst, 4,
+//                    &ethdr, sizeof(ethdr),
+//                    &ip6hdr, sizeof(ip6hdr),
+//                    &ns, sizeof(ns),
+//                    &opt_linkaddr, sizeof(opt_linkaddr));
 }
 
 int handle_wan_side(struct icmp6_proxy_t* proxy, void* pkt, size_t len)
 {
-    size_t offset = 0;
-    struct ether_header* ethdr = eth_header(pkt, &offset);
-    struct ip6_hdr* ip6hdr = ipv6_header(pkt, &offset);
-    struct icmp6_hdr* icmp6hdr = icmp6_header(ip6hdr, &offset);
-
-    if(!acceptable(icmp6hdr)) {
-        return 0;
-    } else if(is_self_addr(&ip6hdr->ip6_src)) {
+    struct icmp6* icmp6 = parse_icmp6(pkt, len);
+    if( !icmp6 ) {
         return 0;
     }
 
-    struct icmp6* icmp6 = parse_icmp6(pkt, len);
-    if( !icmp6 ) {
+    if(!acceptable(proxy, icmp6)) {
+        return 0;
+    }
+
+    const uint8_t* p = icmp6->ethdr.ether_shost;
+    if( p[0] == 0x33 && p[1] == 0x33){
         return 0;
     }
 
@@ -363,7 +444,7 @@ int handle_wan_side(struct icmp6_proxy_t* proxy, void* pkt, size_t len)
                 send_na(&proxy->wan, icmp6, &icmp6->ns.nd_ns_target, &proxy->wan.mac);
             } else {
                 printf("\t\tno entry at LAN side, add entry to WAN side\n");
-                add_nd_table_entry(&proxy->wan.nd_table, &icmp6->ns.nd_ns_target, (struct ether_addr*)ethdr->ether_shost);
+                add_nd_table_entry(&proxy->wan.nd_table, &icmp6->ns.nd_ns_target, (struct ether_addr*)icmp6->ethdr.ether_shost);
             }
         } else {
             /* normal NS packet */
@@ -403,7 +484,7 @@ int handle_wan_side(struct icmp6_proxy_t* proxy, void* pkt, size_t len)
             add_nd_table_entry(&proxy->wan.nd_table, &icmp6->na.nd_na_target, &opt->tlinkaddr.addr);
         } else {
             printf("\tadd entry to WAN side with source mac address\n");
-            add_nd_table_entry(&proxy->wan.nd_table, &icmp6->na.nd_na_target, (struct ether_addr*)&ethdr->ether_shost);
+            add_nd_table_entry(&proxy->wan.nd_table, &icmp6->na.nd_na_target, (struct ether_addr*)icmp6->ethdr.ether_shost);
         }
     } else {
         /* dont care about RS packet */
@@ -412,26 +493,26 @@ int handle_wan_side(struct icmp6_proxy_t* proxy, void* pkt, size_t len)
 
     printf("\n\n");
 RETURN:
-    free(icmp6);
+    //free(icmp6);
     return ret;
 }
 
 int handle_lan_side(struct icmp6_proxy_t* proxy, void* pkt, size_t len)
 {
-    size_t offset = 0;
     union icmp6_opt* opt = NULL;
-    struct ether_header* ethdr = eth_header(pkt, &offset);
-    struct ip6_hdr* ip6hdr = ipv6_header(pkt, &offset);
-    struct icmp6_hdr* icmp6hdr = icmp6_header(ip6hdr, &offset);
 
-    if(!acceptable(icmp6hdr)) {
-        return 0;
-    } else if(is_self_addr(&ip6hdr->ip6_src)) {
-        return 0;
-    }
 
     struct icmp6* icmp6 = parse_icmp6(pkt, len);
     if( !icmp6 ) {
+        return 0;
+    }
+
+    if(!acceptable(proxy, icmp6)) {
+        return 0;
+    }
+
+    const uint8_t* p = icmp6->ethdr.ether_shost;
+    if( p[0] == 0x33 && p[1] == 0x33 ){
         return 0;
     }
 
@@ -447,17 +528,17 @@ int handle_lan_side(struct icmp6_proxy_t* proxy, void* pkt, size_t len)
         find_nd_table_entry(&proxy->lan.nd_table, &icmp6->ns.nd_ns_target, &entry);
         if( entry ) {
             printf("\tentry found at LAN side, ignore this NS packet\n");
-            goto RETURN;
+            return 0;
         }
 
-        if( IN6_IS_ADDR_UNSPECIFIED(&ip6hdr->ip6_src) && IN6_IS_ADDR_MC_LINKLOCAL(&ip6hdr->ip6_dst)) {
+        if( IN6_IS_ADDR_UNSPECIFIED(&icmp6->ip6hdr.ip6_src) && IN6_IS_ADDR_MC_LINKLOCAL(&icmp6->ip6hdr.ip6_dst)) {
             /* this is a DAD packet */
             find_nd_table_entry(&proxy->wan.nd_table, &icmp6->ns.nd_ns_target, &entry);
             if( entry ) {
                 /* send NA paccket with EWMTA2.4's mac to the host at lan side */
                 send_na(&proxy->lan, icmp6, &icmp6->ns.nd_ns_target, &proxy->lan.mac);
             } else {
-                add_nd_table_entry(&proxy->lan.nd_table, &icmp6->ns.nd_ns_target, (struct ether_addr*)ethdr->ether_shost);
+                add_nd_table_entry(&proxy->lan.nd_table, &icmp6->ns.nd_ns_target, (struct ether_addr*)icmp6->ethdr.ether_shost);
             }
         } else {
             /* normal NS packet */
@@ -477,11 +558,11 @@ int handle_lan_side(struct icmp6_proxy_t* proxy, void* pkt, size_t len)
         }
     } else if(icmp6->comm.icmp6_type == ND_NEIGHBOR_ADVERT) {
         if(!proxy->dad_proxy) {
-            goto RETURN;
+            return 0;
         }
 
         if( !IN6_ARE_ADDR_EQUAL(&icmp6->ip6hdr.ip6_dst, &proxy->lan.addr) ) {
-            goto RETURN;
+            return 0;
         }
 
         for(size_t i = 0 ; i < icmp6->opt_cnt ; i ++ ) {
@@ -493,15 +574,15 @@ int handle_lan_side(struct icmp6_proxy_t* proxy, void* pkt, size_t len)
         if( opt ) {
             add_nd_table_entry(&proxy->lan.nd_table, &icmp6->na.nd_na_target, &opt->tlinkaddr.addr);
         } else {
-            add_nd_table_entry(&proxy->lan.nd_table, &icmp6->na.nd_na_target, (struct ether_addr*)&ethdr->ether_shost);
+            add_nd_table_entry(&proxy->lan.nd_table, &icmp6->na.nd_na_target, (struct ether_addr*)icmp6->ethdr.ether_shost);
         }
     } else {
         /* dont care, RADVD will deal with it */
-        goto RETURN;
+        return 0;
     }
 
     printf("\n\n");
+
 RETURN:
-    free(icmp6);
     return 0;
 }
