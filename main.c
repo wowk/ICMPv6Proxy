@@ -17,6 +17,8 @@
 #include <netinet/in.h>
 #include <netinet/icmp6.h>
 #include <sys/select.h>
+#include <sys/signalfd.h>
+
 
 #define max(a, b) ((a > b) ? a : b)
 
@@ -35,10 +37,13 @@ int main(int argc, char** argv)
         error(1, errno, "failed to create icmp6proxy object");
     }
 
-    icmp6proxy->timeout     = 1;
+    icmp6proxy->timeout     = args.ra_interval ?: 1;
+    icmp6proxy->aging_time  = args.aging_time ?: 150;
     icmp6proxy->ra_proxy    = args.ra_proxy;
     icmp6proxy->dad_proxy   = args.dad_proxy;
     icmp6proxy->debug       = args.debug;
+    icmp6proxy->lan.type    = LAN_PORT;
+    icmp6proxy->wan.type    = WAN_PORT;
     icmp6proxy->lan.ifindex = if_nametoindex(args.lan_ifname);
     icmp6proxy->wan.ifindex = if_nametoindex(args.wan_ifname);
     strcpy(icmp6proxy->lan.ifname, args.lan_ifname);
@@ -77,16 +82,6 @@ int main(int argc, char** argv)
         return -errno;
     }
 
-    if( get_link_local_addr(&icmp6proxy->lan) < 0 ) {
-        cleanup_icmp6proxy(icmp6proxy);
-        return -errno;
-    }
-
-    if( get_link_local_addr(&icmp6proxy->wan) < 0 ) {
-        cleanup_icmp6proxy(icmp6proxy);
-        return -errno;
-    }
-
     if( create_timer(icmp6proxy, args.ra_interval) < 0 ) {
         cleanup_icmp6proxy(icmp6proxy);
         return -errno;
@@ -102,12 +97,8 @@ int main(int argc, char** argv)
     FD_SET(icmp6proxy->lan.rawsock, &rfdset_save);
     FD_SET(icmp6proxy->wan.rawsock, &rfdset_save);
     FD_SET(icmp6proxy->timerfd, &rfdset_save);
-    //FD_SET(icmp6proxy->lan.icmp6sock, &rfdset_save);
-    //FD_SET(icmp6proxy->wan.icmp6sock, &rfdset_save);
 
     int max1 = max(icmp6proxy->lan.rawsock, icmp6proxy->wan.rawsock);
-    //int max2 = max(icmp6proxy->lan.icmp6sock, icmp6proxy->wan.icmp6sock);
-    //int max3 = max(max1, max2);
     int maxfd = max(max1, icmp6proxy->timerfd);
 
     icmp6proxy->running = true;
@@ -150,12 +141,11 @@ int main(int argc, char** argv)
                 continue;
             }
             if(icmp6proxy->dad_proxy) {
-                printf("update nd_table\n");
-                update_nd_table(&icmp6proxy->lan.nd_table);
-                update_nd_table(&icmp6proxy->wan.nd_table);
+                update_nd_table(&icmp6proxy->lan, icmp6proxy->timeout);
+                update_nd_table(&icmp6proxy->wan, icmp6proxy->timeout);
             }
             if(icmp6proxy->ra_proxy) {
-                printf("handle ra proxy event\n");
+                ;
             }
 
         }
@@ -168,15 +158,10 @@ int main(int argc, char** argv)
 
 void cleanup_icmp6proxy(struct icmp6_proxy_t* proxy)
 {
-    leave_multicast(&proxy->lan, "ff02::1");
-    leave_multicast(&proxy->lan, "ff02::2");
-    leave_multicast(&proxy->wan, "ff02::1");
-    leave_multicast(&proxy->wan, "ff02::2");
-    close(proxy->lan.icmp6sock);
-    close(proxy->wan.icmp6sock);
-
     setsockopt(proxy->wan.rawsock, SOL_SOCKET, SO_DETACH_FILTER, NULL, 0);
     setsockopt(proxy->wan.rawsock, SOL_SOCKET, SO_DETACH_FILTER, NULL, 0);
     close(proxy->wan.rawsock);
     close(proxy->lan.rawsock);
+    close(proxy->lan.icmp6sock);
+    close(proxy->wan.icmp6sock);
 }

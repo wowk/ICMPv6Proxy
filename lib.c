@@ -32,7 +32,7 @@ int parse_args(int argc, char **argv, struct proxy_args_t *args)
     memset(args, 0, sizeof(*args));
 
     int op;
-    while( -1 != (op = getopt(argc, argv, "l:w:rdDt:")) ) {
+    while( -1 != (op = getopt(argc, argv, "l:w:a:rdDt:")) ) {
         switch (op) {
         case 'l':
             strcpy(args->lan_ifname,optarg);
@@ -42,6 +42,9 @@ int parse_args(int argc, char **argv, struct proxy_args_t *args)
             break;
         case 't':
             args->ra_interval = atoi(optarg);
+            break;
+        case 'a':
+            args->aging_time = atoi(optarg);
             break;
         case 'r':
             args->ra_proxy = true;
@@ -84,35 +87,35 @@ int create_timer(struct icmp6_proxy_t* proxy, unsigned interval)
     return 0;
 }
 
-int join_multicast(struct port_t* port, const char* mc_group)
- {
-     struct ipv6_mreq mreq;
+//int join_multicast(struct port_t* port, const char* mc_group)
+// {
+//     struct ipv6_mreq mreq;
 
-     mreq.ipv6mr_interface   = port->ifindex;
-     inet_pton(AF_INET6, mc_group, &mreq.ipv6mr_multiaddr);
+//     mreq.ipv6mr_interface   = port->ifindex;
+//     inet_pton(AF_INET6, mc_group, &mreq.ipv6mr_multiaddr);
 
-     if( 0 > setsockopt(port->rawsock, SOL_IPV6, IPV6_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) ){
-         error(0, errno, "failed to join multicast group %s", mc_group);
-         return -errno;
-     }
+//     if( 0 > setsockopt(port->rawsock, SOL_IPV6, IPV6_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) ){
+//         error(0, errno, "failed to join multicast group %s", mc_group);
+//         return -errno;
+//     }
 
-     return 0;
- }
+//     return 0;
+// }
 
- int leave_multicast(struct port_t* port, const char* mc_group)
- {
-     struct ipv6_mreq mreq;
+// int leave_multicast(struct port_t* port, const char* mc_group)
+// {
+//     struct ipv6_mreq mreq;
 
-     mreq.ipv6mr_interface   = port->ifindex;
-     inet_pton(AF_INET6, mc_group, &mreq.ipv6mr_multiaddr);
+//     mreq.ipv6mr_interface   = port->ifindex;
+//     inet_pton(AF_INET6, mc_group, &mreq.ipv6mr_multiaddr);
 
-     if( 0 > setsockopt(port->rawsock, SOL_IPV6, IPV6_DROP_MEMBERSHIP, &mreq, sizeof(mreq)) ){
-         error(0, errno, "failed to leave multicast group %s", mc_group);
-         return -errno;
-     }
+//     if( 0 > setsockopt(port->rawsock, SOL_IPV6, IPV6_DROP_MEMBERSHIP, &mreq, sizeof(mreq)) ){
+//         error(0, errno, "failed to leave multicast group %s", mc_group);
+//         return -errno;
+//     }
 
-     return 0;
- }
+//     return 0;
+// }
 
 int create_raw_sock(struct port_t* port)
 {
@@ -212,100 +215,12 @@ int get_hw_addr(struct port_t* port)
     }
     close(fd);
 
-    memcpy(&port->mac, ifr.ifr_hwaddr.sa_data, sizeof(port->mac));
+    memcpy(&port->ethaddr, ifr.ifr_hwaddr.sa_data, sizeof(port->ethaddr));
+    memcpy(&port->mc_ethaddr, ifr.ifr_hwaddr.sa_data, sizeof(port->mc_ethaddr));
+    uint8_t* ptr = (uint8_t*)&port->mc_ethaddr;
+    ptr[0] = ptr[1] = (uint8_t)0x33;
 
     return 0;
-}
-
-int get_link_local_addr(struct port_t* port)
-{
-    bool found = false;
-    struct ifaddrs* ifp = NULL;
-    struct ifaddrs* ptr;
-    struct sockaddr_in6* si6;
-
-    if( 0 > getifaddrs(&ifp) ) {
-        error(0, errno, "failed to get link local addresses");
-        return -errno;
-    }
-
-    ptr = ifp;
-    while( ptr ) {
-        if( !ptr->ifa_name || strcmp(ptr->ifa_name, port->ifname) ) {
-            ptr = ptr->ifa_next;
-            continue;
-        }
-        if(!ptr->ifa_addr) {
-            ptr = ptr->ifa_next;
-            continue;
-        }
-        if(ptr->ifa_addr->sa_family != PF_INET6) {
-            ptr = ptr->ifa_next;
-            continue;
-        }
-        si6 = (struct sockaddr_in6*)ptr->ifa_addr;
-        if(!IN6_IS_ADDR_LINKLOCAL(&si6->sin6_addr)) {
-            ptr = ptr->ifa_next;
-            continue;
-        }
-        found = true;
-        break;
-    }
-
-    if(found) {
-        memcpy(&port->addr, &si6->sin6_addr, sizeof(si6->sin6_addr));
-        inet_pton(PF_INET6, "ff02::1:ff:00:00:00", &port->maddr);
-        memcpy(port->maddr.s6_addr + 13, si6->sin6_addr.s6_addr + 13, 3);
-    }
-
-    freeifaddrs(ifp);
-
-    char ip6addr[128] = "";
-    char mip6addr[128] = "";
-    inet_ntop(PF_INET6, &port->addr, ip6addr, sizeof(ip6addr));
-    inet_ntop(PF_INET6, &port->maddr, mip6addr, sizeof(mip6addr));
-    printf("%s's linklocal address = %s, link loca multicast address: %s\n", port->ifname, ip6addr, mip6addr);
-
-    return found ? 0 : -1;
-}
-
-bool is_self_addr(struct in6_addr* addr)
-{
-    bool found = false;
-    struct ifaddrs* ifp = NULL;
-    struct ifaddrs* ptr;
-    struct sockaddr_in6* si6;
-
-    if( 0 > getifaddrs(&ifp) ) {
-        error(0, errno, "failed to get link addresses");
-        return false;
-    }
-
-    ptr = ifp;
-    while( ptr ) {
-        if(!ptr->ifa_addr) {
-            ptr = ptr->ifa_next;
-            continue;
-        }
-        if(ptr->ifa_addr->sa_family != PF_INET6) {
-            ptr = ptr->ifa_next;
-            continue;
-        }
-        si6 = (struct sockaddr_in6*)ptr->ifa_addr;
-        if(!IN6_ARE_ADDR_EQUAL(addr, &si6->sin6_addr) ) {
-            ptr = ptr->ifa_next;
-            continue;
-        }
-        found = true;
-        break;
-    }
-
-    freeifaddrs(ifp);
-    if( found ){
-        printf("from self, ignore it\n");
-    }
-
-    return found;
 }
 
 struct ether_header* eth_header(void* buffer, size_t* offset)
@@ -350,12 +265,12 @@ ssize_t recv_raw_pkt(struct port_t* port, void* buf, size_t len)
     return ret;
 }
 
-ssize_t send_raw_pkt(struct port_t* port, struct in6_addr* to, size_t iovec_count, ...)
+ssize_t send_raw_pkt(struct port_t* port, size_t iovec_count, ...)
 {
     ssize_t ret;
     uint8_t cbuf[sizeof(struct cmsghdr)];
     struct msghdr msghdr;
-    struct sockaddr_ll si6;
+    struct sockaddr_ll sll;
     struct iovec iovec[iovec_count];
     va_list val;
 
@@ -366,8 +281,8 @@ ssize_t send_raw_pkt(struct port_t* port, struct in6_addr* to, size_t iovec_coun
     }
     va_end(val);
 
-    si6.sll_family  = PF_PACKET;
-    si6.sll_ifindex = port->ifindex;
+    sll.sll_family  = PF_PACKET;
+    sll.sll_ifindex = port->ifindex;
 
     memset(&cbuf, 0, sizeof(cbuf));
     msghdr.msg_iov          = iovec;
@@ -375,8 +290,8 @@ ssize_t send_raw_pkt(struct port_t* port, struct in6_addr* to, size_t iovec_coun
     msghdr.msg_control      = NULL;
     msghdr.msg_controllen   = 0;
     msghdr.msg_flags        = 0;
-    msghdr.msg_name         = &si6;
-    msghdr.msg_namelen      = sizeof(si6);
+    msghdr.msg_name         = &sll;
+    msghdr.msg_namelen      = sizeof(sll);
 
     do {
         ret = sendmsg(port->rawsock, &msghdr, 0);

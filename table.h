@@ -3,6 +3,7 @@
 
 
 #include <stdint.h>
+#include <time.h>
 #include <netinet/in.h>
 #include <netinet/ether.h>
 #include <netinet/ether.h>
@@ -12,14 +13,17 @@
 struct nd_table_entry_t {
     struct ether_addr mac;
     struct in6_addr addr;
+    unsigned expired_time;
     LIST_ENTRY(nd_table_entry_t) entry;
 };
 LIST_HEAD(nd_table_t, nd_table_entry_t);
 
-extern int add_nd_table_entry(struct nd_table_t* nd_table, struct in6_addr* addr, struct ether_addr* mac);
-extern int find_nd_table_entry(struct nd_table_t* nd_table, struct in6_addr* addr, struct nd_table_entry_t** entry);
-extern void dump_nd_table(struct nd_table_t* nd_table);
-extern int update_nd_table(struct nd_table_t* nd_table);
-extern void clear_nd_table(struct nd_table_t* nd_table);
+struct port_t;
+
+extern int add_nd_table_entry(struct port_t* nd_table, struct in6_addr* addr, struct ether_addr* mac, unsigned lifetime);
+extern int find_nd_table_entry(struct port_t* nd_table, struct in6_addr* addr, struct nd_table_entry_t** entry);
+extern void dump_nd_table(struct port_t* nd_table);
+extern int update_nd_table(struct port_t* nd_table, unsigned passed_time);
+extern void clear_nd_table(struct port_t* nd_table);
 
 #endif
