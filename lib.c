@@ -1,7 +1,14 @@
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE
+#endif
+
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 
 #include "debug.h"
 #include "lib.h"
+#include <libgen.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -11,6 +18,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <ifaddrs.h>
+#include <signal.h>
 #include <sys/types.h>
 #include <sys/ioctl.h>
 #include <sys/timerfd.h>
@@ -25,21 +33,21 @@
 #include <net/if_packet.h>
 #include <netpacket/packet.h>
 #include <linux/filter.h>
+#include <sys/signalfd.h>
 
 
-int create_pid_file(const char* app_name)
+int create_pid_file(struct nd_proxy_t* proxy, const char* app_name)
 {
 	FILE* fp = NULL;
     pid_t pid;
-	char pid_file[128] = "";
 
-    snprintf(pid_file, sizeof(pid_file), "/var/run/%s.pid", app_name);
-    if ( access(pid_file, R_OK)  < 0 ) {
+    snprintf(proxy->pid_file, sizeof(proxy->pid_file), "/var/run/%s.pid", app_name);
+    if ( access(proxy->pid_file, R_OK)  < 0 ) {
         info("create pid file %s", app_name);
-        fp = fopen(pid_file, "w");
+        fp = fopen(proxy->pid_file, "w");
     } else {
         info("found pid file");
-        fp = fopen(pid_file, "rw");
+        fp = fopen(proxy->pid_file, "rw");
         fscanf(fp, "%u", &pid);
         char process[32] = "";
         snprintf(process, sizeof(process), "/proc/%u/cmdline", (unsigned)pid);
@@ -48,12 +56,12 @@ int create_pid_file(const char* app_name)
             return -EEXIST;
         } else {
             fclose(fp);
-            fp = fopen(pid_file, "w");
+            fp = fopen(proxy->pid_file, "w");
             info("process logged in pid file is not exist: %s", process);
         }
     }
     if ( !fp ) {
-        error(0, errno, "cant create pid file %s", pid_file);
+        error(0, errno, "cant create pid file %s", proxy->pid_file);
         return -errno;
     }
 
@@ -68,7 +76,7 @@ int parse_args(int argc, char **argv, struct proxy_args_t *args)
     memset(args, 0, sizeof(*args));
 
     int op;
-    while( -1 != (op = getopt(argc, argv, "l:w:a:rdDt:")) ) {
+    while( -1 != (op = getopt(argc, argv, "l:w:a:rdDt:f")) ) {
         switch (op) {
         case 'l':
             strcpy(args->lan_ifname,optarg);
@@ -101,9 +109,11 @@ int parse_args(int argc, char **argv, struct proxy_args_t *args)
             break;
         }
     }
+
+    return 0;
 }
 
-int create_timer(struct icmp6_proxy_t* proxy, unsigned interval)
+int create_timer(struct nd_proxy_t* proxy, unsigned interval)
 {
     proxy->timerfd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC|TFD_NONBLOCK);
     if( proxy->timerfd < 0 ) {
@@ -125,36 +135,6 @@ int create_timer(struct icmp6_proxy_t* proxy, unsigned interval)
 
     return 0;
 }
-
-//int join_multicast(struct port_t* port, const char* mc_group)
-// {
-//     struct ipv6_mreq mreq;
-
-//     mreq.ipv6mr_interface   = port->ifindex;
-//     inet_pton(AF_INET6, mc_group, &mreq.ipv6mr_multiaddr);
-
-//     if( 0 > setsockopt(port->rawsock, SOL_IPV6, IPV6_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) ){
-//         error(0, errno, "failed to join multicast group %s", mc_group);
-//         return -errno;
-//     }
-
-//     return 0;
-// }
-
-// int leave_multicast(struct port_t* port, const char* mc_group)
-// {
-//     struct ipv6_mreq mreq;
-
-//     mreq.ipv6mr_interface   = port->ifindex;
-//     inet_pton(AF_INET6, mc_group, &mreq.ipv6mr_multiaddr);
-
-//     if( 0 > setsockopt(port->rawsock, SOL_IPV6, IPV6_DROP_MEMBERSHIP, &mreq, sizeof(mreq)) ){
-//         error(0, errno, "failed to leave multicast group %s", mc_group);
-//         return -errno;
-//     }
-
-//     return 0;
-// }
 
 int create_raw_sock(struct port_t* port)
 {
@@ -400,4 +380,51 @@ uint16_t checksum_fold(uint32_t sum)
     }
 
     return ~sum;
+}
+
+int create_signalfd(struct nd_proxy_t* proxy, unsigned sig_cnt, ...)
+{
+    sigset_t sigset;
+    sigemptyset(&sigset);
+
+    va_list val;
+    va_start(val, sig_cnt);
+    for( unsigned i = 0 ; i < sig_cnt ; i ++ ){
+        sigaddset(&sigset, va_arg(val, int));
+    }
+
+    sigprocmask(SIG_BLOCK, &sigset, NULL);
+    proxy->sigfd = signalfd(-1, &sigset, SFD_CLOEXEC);
+    if( proxy->sigfd < 0 ){
+        error(0, errno, "failed to create signalfd");
+        return -errno;
+    }
+
+    return 0;
+}
+
+int send_signal(char* process_name, int sig, int val)
+{
+    char pid_file[FILENAME_MAX] = "";
+
+    snprintf(pid_file, sizeof(pid_file), "/var/run/%s.pid", process_name);
+    if( access(pid_file, R_OK) < 0 ){
+        error(0, errno, "failed to find process %s's pidfile %s", process_name, pid_file);
+        return -errno;
+    }
+
+    unsigned pid;
+    FILE* fp = fopen(pid_file, "r");
+    fscanf(fp, "%u", &pid);
+    fclose(fp);
+
+
+    union sigval sval;
+    sval.sival_int = val;
+    if( 0 > sigqueue(pid, sig, sval) ){
+        error(0, errno, "failed to send signal %u with val %d to %s", sig, val, process_name);
+        return -errno;
+    }
+
+    return 0;
 }

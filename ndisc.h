@@ -36,7 +36,7 @@ struct icmp6 {
     union icmp6_opt opt[0];
 };
 
-extern int handle_wan_side(struct icmp6_proxy_t* proxy, void* pkt, size_t len);
-extern int handle_lan_side(struct icmp6_proxy_t* proxy, void* pkt, size_t len);
+extern int handle_wan_side(struct nd_proxy_t* proxy, void* pkt, size_t len);
+extern int handle_lan_side(struct nd_proxy_t* proxy, void* pkt, size_t len);
 
 #endif

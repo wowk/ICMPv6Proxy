@@ -10,7 +10,7 @@
 #include <arpa/inet.h>
 #include <sys/timerfd.h>
 #include <sys/queue.h>
-#include <sys/sysinfo.h>
+
 #include <netinet/ip6.h>
 
 
@@ -63,7 +63,7 @@ static inline bool is_dad_packet(struct icmp6* icmp6)
     return IN6_IS_ADDR_UNSPECIFIED(&icmp6->ip6hdr.ip6_src) && IN6_IS_ADDR_MULTICAST(&icmp6->ip6hdr.ip6_dst) ? true : false;
 }
 
-static bool acceptable(struct icmp6_proxy_t* proxy, struct icmp6* icmp6)
+static bool acceptable(struct nd_proxy_t* proxy, struct icmp6* icmp6)
 {
     switch (icmp6->comm.icmp6_type) {
     case ND_NEIGHBOR_SOLICIT:
@@ -163,6 +163,7 @@ static struct icmp6* parse_icmp6(void* pkt, size_t len)
 
 static int disable_ra_if_got_same_prefix(struct icmp6* icmp6)
 {
+
     return 0;
 }
 
@@ -351,7 +352,7 @@ static int send_ns(struct port_t* port, struct icmp6* icmp6, struct in6_addr* ta
     return ret;
 }
 
-int handle_wan_side(struct icmp6_proxy_t* proxy, void* pkt, size_t len)
+int handle_wan_side(struct nd_proxy_t* proxy, void* pkt, size_t len)
 {
     struct icmp6* icmp6 = parse_icmp6(pkt, len);
     if( !icmp6 ) {
@@ -442,7 +443,7 @@ RETURN:
     return ret;
 }
 
-int handle_lan_side(struct icmp6_proxy_t* proxy, void* pkt, size_t len)
+int handle_lan_side(struct nd_proxy_t* proxy, void* pkt, size_t len)
 {
     union icmp6_opt* opt = NULL;
 

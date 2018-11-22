@@ -3,10 +3,10 @@
 
 #include "proxy.h"
 
-extern int create_pid_file(const char* app_name);
+extern int create_pid_file(struct nd_proxy_t* proxy, const char* app_name);
 extern int parse_args(int argc, char** argv, struct proxy_args_t* args);
 
-extern int create_timer(struct icmp6_proxy_t* proxy, unsigned interval);
+extern int create_timer(struct nd_proxy_t* proxy, unsigned interval);
 
 extern struct ether_header* eth_header(void* buffer, size_t* offset);
 extern struct icmp6_hdr* icmp6_header(void* buffer, size_t* offset);
@@ -22,5 +22,8 @@ extern int get_hw_addr(struct port_t* port);
 
 extern uint32_t checksum_partial(void* data, size_t len, uint32_t sum);
 extern uint16_t checksum_fold(uint32_t sum);
+
+extern int create_signalfd(struct nd_proxy_t* proxy, unsigned sig_cnt, ...);
+extern int send_signal(char* process_name, int sig, int val);
 
 #endif

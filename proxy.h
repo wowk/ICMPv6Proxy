@@ -10,6 +10,7 @@
 #include <netinet/ether.h>
 #include <sys/queue.h>
 #include <netinet/icmp6.h>
+#include <sys/signalfd.h>
 
 
 struct proxy_args_t {
@@ -22,6 +23,17 @@ struct proxy_args_t {
     unsigned aging_time;
     uint32_t ra_interval;
 };
+
+typedef enum {
+    SIG_EVENT_DISABLE_RA_PROXY,
+    SIG_EVENT_DISABLE_DAD_PROXY,
+    SIG_EVENT_ENABLE_RA_PROXY,
+    SIG_EVENT_ENABLE_DAD_PROXY,
+    SIG_EVENT_DUMP_NEIGHBOR_CACHE_TABLE,
+    SIG_EVENT_DUMP_BINDING_TABLE,
+    SIG_EVENT_CLEAR_NEIGHBOR_CACHE_TABLE,
+    SIG_EVENT_CLEAR_BINDING_TABLE,
+}sig_event_e;
 
 typedef enum{
     LAN_PORT,
@@ -41,13 +53,15 @@ struct port_t {
     struct nd_table_t  nd_table;
 };
 
-struct icmp6_proxy_t {
+struct nd_proxy_t {
+    int sigfd;
     int timerfd;
     struct port_t wan;
     struct port_t lan;
     uint32_t max_entrys;
     uint32_t aging_time;
     uint32_t timeout;
+    char pid_file[128];
     bool ra_proxy;
     bool dad_proxy;
     bool debug;
