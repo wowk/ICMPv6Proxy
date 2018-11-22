@@ -30,12 +30,10 @@ int delete_host_route_rule(struct port_t* port, struct in6_addr* addr)
     if( port->type != LAN_PORT ){
         return 0;
     }
-    debug("line: %u", __LINE__);
+
     char hostaddr[INET6_ADDRSTRLEN] = "";
     char cmd[256] = "";
-    debug("line: %u", __LINE__);
     inet_ntop(PF_INET6, addr, hostaddr, sizeof(hostaddr));
-    debug("line: %u", __LINE__);
     snprintf(cmd, sizeof(cmd), "ip -6 route del %s dev %s >/dev/null", hostaddr, port->ifname);
     info("delete host route rule: %s", cmd);
     return system(cmd);

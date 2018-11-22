@@ -331,7 +331,7 @@ static int send_ns(struct port_t* port, struct icmp6* icmp6, struct in6_addr* ta
 
     struct in6_addr dstaddr;
 #if 1
-    inet_pton(PF_INET6, "ff02::01:ff:00:00:00", &dstaddr);
+    inet_pton(PF_INET6, "ff02::01:ff00:00", &dstaddr);
     memcpy(dstaddr.s6_addr + 13, target->s6_addr + 13, 3);
 #else
     inet_pton(PF_INET6, "ff02::01", &dstaddr);

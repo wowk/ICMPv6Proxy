@@ -3,6 +3,7 @@
 #endif
 
 #include "ndisc.h"
+#include "rtnlmsg.h"
 #include "proxy.h"
 #include "debug.h"
 #include "lib.h"
@@ -93,15 +94,23 @@ int nd_proxy_main(int argc, char** argv)
         }
     }
 
-    ndproxy->timeout     = args.ra_interval ?: 1;
-    ndproxy->aging_time  = args.aging_time ?: 150;
-    ndproxy->ra_proxy    = args.ra_proxy;
-    ndproxy->dad_proxy   = args.dad_proxy;
-    ndproxy->debug       = args.debug;
-    ndproxy->lan.type    = LAN_PORT;
-    ndproxy->wan.type    = WAN_PORT;
-    ndproxy->lan.ifindex = if_nametoindex(args.lan_ifname);
-    ndproxy->wan.ifindex = if_nametoindex(args.wan_ifname);
+    ndproxy->timerfd    = -1;
+    ndproxy->sigfd      = -1;
+    ndproxy->rtnlfd     = -1;
+    ndproxy->lan.rawsock= -1;
+    ndproxy->wan.rawsock= -1;
+    ndproxy->lan.icmp6sock = -1;
+    ndproxy->wan.icmp6sock = -1;
+
+    ndproxy->timeout    = args.ra_interval ?: 1;
+    ndproxy->aging_time = args.aging_time ?: 150;
+    ndproxy->ra_proxy   = args.ra_proxy;
+    ndproxy->dad_proxy  = args.dad_proxy;
+    ndproxy->debug      = args.debug;
+    ndproxy->lan.type   = LAN_PORT;
+    ndproxy->wan.type   = WAN_PORT;
+    ndproxy->lan.ifindex= if_nametoindex(args.lan_ifname);
+    ndproxy->wan.ifindex= if_nametoindex(args.wan_ifname);
     strcpy(ndproxy->lan.ifname, args.lan_ifname);
     strcpy(ndproxy->wan.ifname, args.wan_ifname);
     LIST_INIT(&ndproxy->lan.nd_table);
@@ -151,20 +160,27 @@ int nd_proxy_main(int argc, char** argv)
         return -errno;
     }
 
+    if( create_rtnl_mc_socket(ndproxy, RTMGRP_IPV6_ROUTE) < 0){
+        cleanup_nd_proxy(ndproxy);
+        return -errno;
+    }
+
     ssize_t retlen;
     fd_set rfdset;
     fd_set rfdset_save;
-    uint8_t pktbuf[1520] = "";
+    uint8_t buffer[1520] = "";
 
     FD_ZERO(&rfdset_save);
     FD_SET(ndproxy->lan.rawsock, &rfdset_save);
     FD_SET(ndproxy->wan.rawsock, &rfdset_save);
     FD_SET(ndproxy->timerfd, &rfdset_save);
     FD_SET(ndproxy->sigfd, &rfdset_save);
+    FD_SET(ndproxy->rtnlfd, &rfdset_save);
 
     int max1 = max(ndproxy->lan.rawsock, ndproxy->wan.rawsock);
     int max2 = max(ndproxy->sigfd, max1);
-    int maxfd = max(max2, ndproxy->timerfd);
+    int max3 = max(ndproxy->rtnlfd, max2);
+    int maxfd = max(max3, ndproxy->timerfd);
 
     ndproxy->running = true;
     while (ndproxy->running) {
@@ -182,21 +198,21 @@ int nd_proxy_main(int argc, char** argv)
         }
 
         if( FD_ISSET(ndproxy->lan.rawsock, &rfdset) ) {
-            retlen = recv_raw_pkt(&ndproxy->lan, pktbuf, sizeof(pktbuf));
+            retlen = recv_raw_pkt(&ndproxy->lan, buffer, sizeof(buffer));
             if( 0 > retlen ) {
                 error(0, errno, "failed to read icmp6 packet from lan");
                 break;
             }
-            handle_lan_side(ndproxy, pktbuf, retlen);
+            handle_lan_side(ndproxy, buffer, retlen);
         }
 
         if( FD_ISSET(ndproxy->wan.rawsock, &rfdset) ) {
-            retlen = recv_raw_pkt(&ndproxy->wan, pktbuf, sizeof(pktbuf));
+            retlen = recv_raw_pkt(&ndproxy->wan, buffer, sizeof(buffer));
             if( 0 > retlen ) {
                 error(0, errno, "failed to read icmp6 packet from wan");
                 break;
             }
-            handle_wan_side(ndproxy, pktbuf, retlen);
+            handle_wan_side(ndproxy, buffer, retlen);
         }
 
         if( FD_ISSET(ndproxy->timerfd, &rfdset) ) {
@@ -222,6 +238,14 @@ int nd_proxy_main(int argc, char** argv)
             read(ndproxy->sigfd, &ssi, sizeof(ssi));
             handle_signal(ndproxy, &ssi);
         }
+
+        if( FD_ISSET(ndproxy->rtnlfd, &rfdset) ){
+            error(0,0,"got route event");
+            while( (0 > (retlen = read(ndproxy->rtnlfd, buffer, sizeof(buffer)))) && errno == EINTR);
+            if( retlen > 0 ){
+                handle_rtnl_mc_msg(ndproxy, buffer, retlen);
+            }
+        }
     }
 
     cleanup_nd_proxy(ndproxy);
@@ -237,7 +261,6 @@ int main(int argc, char** argv)
 
 void handle_signal(struct nd_proxy_t* proxy, struct signalfd_siginfo* ssi)
 {
-    printf("signal\n");
     switch (ssi->ssi_signo) {
     case SIGINT:
         info("Got SIGINT");
@@ -287,13 +310,28 @@ void handle_signal(struct nd_proxy_t* proxy, struct signalfd_siginfo* ssi)
 void cleanup_nd_proxy(struct nd_proxy_t* proxy)
 {
     remove(proxy->pid_file);
-    setsockopt(proxy->wan.rawsock, SOL_SOCKET, SO_DETACH_FILTER, NULL, 0);
-    setsockopt(proxy->wan.rawsock, SOL_SOCKET, SO_DETACH_FILTER, NULL, 0);
+
     clear_nd_table(&proxy->lan);
     clear_nd_table(&proxy->wan);
-    close(proxy->sigfd);
-    close(proxy->wan.rawsock);
-    close(proxy->lan.rawsock);
-    close(proxy->lan.icmp6sock);
-    close(proxy->wan.icmp6sock);
+
+    if( proxy->timerfd >= 0 )
+        close(proxy->timerfd);
+    if( proxy->rtnlfd >= 0 )
+        close(proxy->rtnlfd);
+    if( proxy->sigfd >= 0 )
+        close(proxy->sigfd);
+
+    if( proxy->wan.rawsock >= 0 ){
+        setsockopt(proxy->wan.rawsock, SOL_SOCKET, SO_DETACH_FILTER, NULL, 0);
+        close(proxy->wan.rawsock);
+    }
+    if( proxy->lan.rawsock >= 0 ){
+        setsockopt(proxy->lan.rawsock, SOL_SOCKET, SO_DETACH_FILTER, NULL, 0);
+        close(proxy->lan.rawsock);
+    }
+
+    if( proxy->wan.icmp6sock >= 0 )
+        close(proxy->wan.icmp6sock);
+    if( proxy->lan.rawsock >= 0 )
+        close(proxy->lan.icmp6sock);
 }

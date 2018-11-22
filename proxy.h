@@ -54,6 +54,7 @@ struct port_t {
 };
 
 struct nd_proxy_t {
+    int rtnlfd;
     int sigfd;
     int timerfd;
     struct port_t wan;
